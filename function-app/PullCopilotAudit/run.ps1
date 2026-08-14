@@ -11,15 +11,19 @@ $storageAccount = $env:STORAGE_ACCOUNT_NAME
 $container      = $env:STORAGE_CONTAINER_NAME ?? "copilot-logs"
 $windowMinutes  = [int]($env:TIME_WINDOW_MINUTES ?? "16")
 $maxChunkSize   = 500
+$mgmtApiBase    = $env:MGMT_API_BASE ?? "https://manage.office.com"
+$monitorAudience = $env:MONITOR_AUDIENCE ?? "https://monitor.azure.com"
+$storageAudience = $env:STORAGE_AUDIENCE ?? "https://storage.azure.com"
+$storageSuffix  = $env:STORAGE_SUFFIX ?? "blob.core.windows.net"
 
 $startTime = (Get-Date).ToUniversalTime().AddMinutes(-$windowMinutes).ToString("yyyy-MM-ddTHH:mm:ss")
 $endTime   = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss")
 
 # --- Load last-processed timestamp from state blob ---
-$stateBlob = "https://$storageAccount.blob.core.windows.net/$container/_state/lastProcessed.txt"
+$stateBlob = "https://$storageAccount.$storageSuffix/$container/_state/lastProcessed.txt"
 $stateToken = $null
 try {
-    $stateTokenUri = "$($env:IDENTITY_ENDPOINT)?resource=https://storage.azure.com&api-version=2019-08-01"
+    $stateTokenUri = "$($env:IDENTITY_ENDPOINT)?resource=$storageAudience&api-version=2019-08-01"
     $stateToken = (Invoke-RestMethod -Uri $stateTokenUri -Headers @{ "X-IDENTITY-HEADER" = $env:IDENTITY_HEADER }).access_token
     $lastProcessed = Invoke-RestMethod -Uri $stateBlob -Headers @{ "Authorization" = "Bearer $stateToken"; "x-ms-version" = "2021-08-06" }
     if ($lastProcessed -and $lastProcessed.Trim().Length -gt 0) {
@@ -68,11 +72,11 @@ function Invoke-WithRetry {
     }
 }
 
-$mgmtToken    = Get-ManagedToken -Resource "https://manage.office.com"
-$monitorToken = Get-ManagedToken -Resource "https://monitor.azure.com"
-$storageToken = Get-ManagedToken -Resource "https://storage.azure.com"
+$mgmtToken    = Get-ManagedToken -Resource $mgmtApiBase
+$monitorToken = Get-ManagedToken -Resource $monitorAudience
+$storageToken = Get-ManagedToken -Resource $storageAudience
 
-$listUri = "https://manage.office.com/api/v1.0/$tenantId/activity/feed/subscriptions/content?contentType=Audit.General&startTime=$startTime&endTime=$endTime"
+$listUri = "$mgmtApiBase/api/v1.0/$tenantId/activity/feed/subscriptions/content?contentType=Audit.General&startTime=$startTime&endTime=$endTime"
 $allContentBlobs = [System.Collections.Generic.List[object]]::new()
 
 Write-Host "Listing content blobs..."
@@ -108,7 +112,7 @@ foreach ($blob in $allContentBlobs) {
 
     $dateFolder = (Get-Date).ToUniversalTime().ToString("yyyy/MM/dd")
     $blobName = "$dateFolder/$((Get-Date).ToUniversalTime().ToString('HHmmss'))-$([guid]::NewGuid().ToString()).json"
-    $blobUri = "https://$storageAccount.blob.core.windows.net/$container/$blobName"
+    $blobUri = "https://$storageAccount.$storageSuffix/$container/$blobName"
     $storageHeaders = @{
         "Authorization"  = "Bearer $storageToken"
         "x-ms-blob-type" = "BlockBlob"

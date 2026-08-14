@@ -122,18 +122,35 @@ Create a temporary timer function to activate the Management Activity API subscr
 | State blob for deduplication | Eliminates overlap; each run picks up where the last ended |
 | 16-minute default window | Just over the 15-min interval; state tracking overrides after first run |
 
-## DoD Cloud Adaptation
+## Cloud Environment Support
 
-| Component | Commercial | DoD |
-|-----------|-----------|-----|
-| Management API | manage.office.com | manage.office365.us |
-| Graph API | graph.microsoft.com | graph.microsoft.us |
-| Login | login.microsoftonline.com | login.microsoftonline.us |
-| Storage | .blob.core.windows.net | .blob.core.usgovcloudapi.net |
-| Monitor | https://monitor.azure.com | https://monitor.azure.us |
-| Portal | portal.azure.com | portal.azure.us |
+The solution supports all Azure/M365 cloud environments via a single parameter:
 
-Update the function code environment variables and Bicep parameters for DoD endpoints.
+| Environment | `cloudEnvironment` value | Management API | Monitor Audience |
+|------------|-------------------------|----------------|-----------------|
+| Commercial | `Commercial` | manage.office.com | monitor.azure.com |
+| GCC | `GCC` | manage-gcc.office.com | monitor.azure.com |
+| GCC High | `GCCHigh` | manage.office365.us | monitor.azure.us |
+| DoD | `DoD` | manage.protection.apps.mil | monitor.azure.us |
+
+Set the `cloudEnvironment` parameter during deployment. The Bicep template automatically configures:
+- Function App environment variables for the correct API endpoints
+- Storage suffixes for the target cloud
+- Monitor audience for the Logs Ingestion API
+
+No manual code changes needed — the function code reads endpoints from environment variables.
+
+### CLI deployment for GCC High:
+
+```bash
+az deployment group create \
+  --resource-group rg-copilot-adoption \
+  --template-file infra/main.bicep \
+  --parameters tenantId=<your-tenant-id> \
+               cloudEnvironment=GCCHigh \
+               auditStorageName=<name> \
+               funcStorageName=<name>
+```
 
 ## Repo Structure
 

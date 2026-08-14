@@ -4,6 +4,10 @@ param location string = resourceGroup().location
 @description('Your Microsoft Entra tenant ID')
 param tenantId string
 
+@description('Target cloud environment')
+@allowed(['Commercial', 'GCC', 'GCCHigh', 'DoD'])
+param cloudEnvironment string = 'Commercial'
+
 @description('Name for the Log Analytics workspace')
 param lawName string = 'law-copilot-adoption'
 
@@ -28,6 +32,36 @@ param vnetName string = 'vnet-copilot-adoption'
 
 @description('Custom table name (without _CL suffix)')
 param tableName string = 'CopilotAudit'
+
+// Cloud-specific endpoint mappings
+var cloudEndpoints = {
+  Commercial: {
+    managementApi: 'https://manage.office.com'
+    monitorAudience: 'https://monitor.azure.com'
+    storageAudience: 'https://storage.azure.com'
+    storageSuffix: 'blob.core.windows.net'
+  }
+  GCC: {
+    managementApi: 'https://manage-gcc.office.com'
+    monitorAudience: 'https://monitor.azure.com'
+    storageAudience: 'https://storage.azure.com'
+    storageSuffix: 'blob.core.windows.net'
+  }
+  GCCHigh: {
+    managementApi: 'https://manage.office365.us'
+    monitorAudience: 'https://monitor.azure.us'
+    storageAudience: 'https://storage.azure.com'
+    storageSuffix: 'blob.core.usgovcloudapi.net'
+  }
+  DoD: {
+    managementApi: 'https://manage.protection.apps.mil'
+    monitorAudience: 'https://monitor.azure.us'
+    storageAudience: 'https://storage.azure.com'
+    storageSuffix: 'blob.core.usgovcloudapi.net'
+  }
+}
+
+var selectedCloud = cloudEndpoints[cloudEnvironment]
 
 // VNet
 resource vnet 'Microsoft.Network/virtualNetworks@2024-01-01' = {
@@ -266,6 +300,11 @@ resource funcApp 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'STORAGE_ACCOUNT_NAME', value: auditStorage.name }
         { name: 'STORAGE_CONTAINER_NAME', value: 'copilot-logs' }
         { name: 'TIME_WINDOW_MINUTES', value: '16' }
+        { name: 'CLOUD_ENVIRONMENT', value: cloudEnvironment }
+        { name: 'MGMT_API_BASE', value: selectedCloud.managementApi }
+        { name: 'MONITOR_AUDIENCE', value: selectedCloud.monitorAudience }
+        { name: 'STORAGE_AUDIENCE', value: selectedCloud.storageAudience }
+        { name: 'STORAGE_SUFFIX', value: selectedCloud.storageSuffix }
       ]
     }
   }
