@@ -49,8 +49,6 @@ az deployment group create \
                funcStorageName=<globally-unique-name>
 ```
 
-> The Deploy to Azure button above links directly to this repo's ARM template. No URL changes needed.
-
 ### 2. Grant API Permissions (post-deployment)
 
 Run locally (NOT in Cloud Shell — it cannot get tokens for manage.office.com):
