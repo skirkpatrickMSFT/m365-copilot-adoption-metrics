@@ -1,0 +1,122 @@
+{
+  "version": "Notebook/1.0",
+  "items": [
+    {
+      "type": 9,
+      "content": {
+        "version": "KqlParameterItem/1.0",
+        "parameters": [
+          {
+            "id": "timeRange",
+            "version": "KqlParameterItem/1.0",
+            "name": "TimeRange",
+            "type": 4,
+            "isRequired": true,
+            "value": { "durationMs": 604800000 },
+            "typeSettings": {
+              "selectableValues": [
+                { "durationMs": 86400000 },
+                { "durationMs": 604800000 },
+                { "durationMs": 2592000000 },
+                { "durationMs": 7776000000 }
+              ]
+            },
+            "label": "Time Range"
+          }
+        ]
+      },
+      "name": "parameters"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "CopilotAudit_CL\n| where TimeGenerated {TimeRange}\n| where Workload == \"Copilot\"\n| summarize DAU=dcount(UserId) by bin(TimeGenerated, 1d)\n| render timechart",
+        "size": 0,
+        "title": "Daily Active Copilot Users",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "timechart"
+      },
+      "name": "dau-chart"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "CopilotAudit_CL\n| where TimeGenerated {TimeRange}\n| where Workload == \"Copilot\"\n| summarize WAU=dcount(UserId) by bin(TimeGenerated, 7d)\n| render timechart",
+        "size": 0,
+        "title": "Weekly Active Copilot Users",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "timechart"
+      },
+      "name": "wau-chart"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "CopilotAudit_CL\n| where TimeGenerated {TimeRange}\n| where Workload == \"Copilot\"\n| where isnotempty(AppHost)\n| summarize Users=dcount(UserId), Interactions=count() by AppHost\n| order by Interactions desc\n| render piechart",
+        "size": 0,
+        "title": "Adoption by App",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "piechart"
+      },
+      "name": "app-breakdown"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "CopilotAudit_CL\n| where Workload == \"Copilot\"\n| summarize FirstUse=min(TimeGenerated) by UserId\n| summarize NewUsers=count() by bin(FirstUse, 1d)\n| order by FirstUse asc\n| extend CumulativeUsers=row_cumsum(NewUsers)\n| render timechart",
+        "size": 0,
+        "title": "Cumulative Unique Users",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "timechart"
+      },
+      "name": "cumulative-adoption"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "CopilotAudit_CL\n| where TimeGenerated {TimeRange}\n| where Workload == \"Copilot\"\n| summarize Interactions=count() by UserId\n| top 25 by Interactions desc\n| render barchart",
+        "size": 0,
+        "title": "Top 25 Power Users",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "barchart"
+      },
+      "name": "top-users"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "CopilotAudit_CL\n| where TimeGenerated {TimeRange}\n| where Workload == \"Copilot\"\n| summarize Interactions=count() by UserId\n| summarize Users=count() by Bucket=case(\n    Interactions <= 5, \"1-5\",\n    Interactions <= 20, \"6-20\",\n    Interactions <= 50, \"21-50\",\n    Interactions <= 100, \"51-100\",\n    \"100+\")\n| render barchart",
+        "size": 0,
+        "title": "Engagement Distribution",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "barchart"
+      },
+      "name": "engagement-distribution"
+    },
+    {
+      "type": 3,
+      "content": {
+        "version": "KqlItem/1.0",
+        "query": "CopilotAudit_CL\n| where TimeGenerated {TimeRange}\n| where Workload == \"Copilot\"\n| extend Hour=hourofday(TimeGenerated)\n| summarize Interactions=count() by Hour\n| order by Hour asc\n| render columnchart",
+        "size": 0,
+        "title": "Activity by Hour",
+        "queryType": 0,
+        "resourceType": "microsoft.operationalinsights/workspaces",
+        "visualization": "barchart"
+      },
+      "name": "activity-by-hour"
+    }
+  ]
+}

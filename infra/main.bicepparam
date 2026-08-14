@@ -1,0 +1,10 @@
+using './main.bicep'
+
+param tenantId = ''
+param auditStorageName = ''
+param funcStorageName = ''
+param funcAppName = 'func-copilot-audit-ingest'
+param lawName = 'law-copilot-adoption'
+param dceName = 'dce-copilot-audit'
+param vnetName = 'vnet-copilot-adoption'
+param tableName = 'CopilotAudit'
