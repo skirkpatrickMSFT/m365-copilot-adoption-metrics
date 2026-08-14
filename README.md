@@ -34,7 +34,7 @@ ADLS Gen2   Log Analytics ──▶ Azure Monitor Workbook
 
 ### 1. Deploy Infrastructure
 
-[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2FYOUR_ORG%2Fcopilot-adoption-dashboard%2Fmain%2Finfra%2Fazuredeploy.json)
+[![Deploy to Azure](https://aka.ms/deploytoazurebutton)](https://portal.azure.com/#create/Microsoft.Template/uri/https%3A%2F%2Fraw.githubusercontent.com%2FskirkpatrickMSFT%2Fm365-copilot-adoption-metrics%2Fmain%2Finfra%2Fazuredeploy.json)
 
 Or via CLI:
 
@@ -49,7 +49,7 @@ az deployment group create \
                funcStorageName=<globally-unique-name>
 ```
 
-> **Important:** Update the Deploy to Azure button URL after pushing to your GitHub repo. Replace `YOUR_ORG/copilot-adoption-dashboard` with your actual repo path, and ensure `infra/azuredeploy.json` exists (compile from Bicep: `az bicep build --file infra/main.bicep --outfile infra/azuredeploy.json`).
+> The Deploy to Azure button above links directly to this repo's ARM template. No URL changes needed.
 
 ### 2. Grant API Permissions (post-deployment)
 
