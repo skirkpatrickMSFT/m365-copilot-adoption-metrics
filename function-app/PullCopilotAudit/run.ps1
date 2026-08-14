@@ -119,7 +119,7 @@ foreach ($blob in $allContentBlobs) {
         "Content-Type"   = "application/json"
         "x-ms-version"   = "2021-08-06"
     }
-    $blobBody = $copilotEvents | ConvertTo-Json -Depth 20 -Compress
+    $blobBody = $copilotEvents | ConvertTo-Json -Depth 20
     if ($copilotEvents.Count -eq 1) { $blobBody = "[$blobBody]" }
 
     try {
