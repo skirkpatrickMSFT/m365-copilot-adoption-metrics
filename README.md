@@ -177,8 +177,6 @@ copilot-adoption-dashboard/
 │   └── copilot-adoption-workbook.json
 ├── scripts/
 │   └── Post-Deploy.ps1         # Grants ActivityFeed.Read permission
-├── docs/
-│   └── generate-guide.js       # Word document generator
 └── README.md
 ```
 
