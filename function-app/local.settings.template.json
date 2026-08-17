@@ -1,0 +1,20 @@
+{
+	"IsEncrypted": false,
+	"Values": {
+		"AzureWebJobsStorage": "UseDevelopmentStorage=true",
+		"FUNCTIONS_WORKER_RUNTIME": "powershell",
+		"FUNCTIONS_WORKER_RUNTIME_VERSION": "7.4",
+		"TENANT_ID": "",
+		"DCE_INGESTION_URI": "",
+		"DCR_IMMUTABLE_ID": "",
+		"STREAM_NAME": "Custom-CopilotAudit_CL",
+		"STORAGE_ACCOUNT_NAME": "",
+		"STORAGE_CONTAINER_NAME": "copilot-logs",
+		"TIME_WINDOW_MINUTES": "16",
+		"CLOUD_ENVIRONMENT": "Commercial",
+		"MGMT_API_BASE": "",
+		"MONITOR_AUDIENCE": "",
+		"STORAGE_AUDIENCE": "",
+		"STORAGE_SUFFIX": ""
+	}
+}

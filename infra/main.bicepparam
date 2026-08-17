@@ -1,8 +1,10 @@
 using './main.bicep'
 
 param tenantId = ''
-param auditStorageName = ''
-param funcStorageName = ''
+// Replace these globally unique placeholder names before deployment.
+param auditStorageName = 'replaceauditstorage'
+param funcStorageName = 'replacefuncstorage'
+param cloudEnvironment = 'Commercial'
 param funcAppName = 'func-copilot-audit-ingest'
 param lawName = 'law-copilot-adoption'
 param dceName = 'dce-copilot-audit'

@@ -62,6 +62,51 @@ var cloudEndpoints = {
 }
 
 var selectedCloud = cloudEndpoints[cloudEnvironment]
+var isAzureGovernment = contains(['GCCHigh', 'DoD'], cloudEnvironment)
+var privateDnsZoneNames = isAzureGovernment ? [
+  'privatelink.azurewebsites.us'
+  'privatelink.blob.core.usgovcloudapi.net'
+  'privatelink.dfs.core.usgovcloudapi.net'
+  'privatelink.queue.core.usgovcloudapi.net'
+  'privatelink.table.core.usgovcloudapi.net'
+  'privatelink.monitor.azure.us'
+  'privatelink.adx.monitor.azure.us'
+  'privatelink.oms.opinsights.azure.us'
+  'privatelink.ods.opinsights.azure.us'
+  'privatelink.agentsvc.azure-automation.us'
+] : [
+  'privatelink.azurewebsites.net'
+  'privatelink.blob.core.windows.net'
+  'privatelink.dfs.core.windows.net'
+  'privatelink.queue.core.windows.net'
+  'privatelink.table.core.windows.net'
+  'privatelink.monitor.azure.com'
+  'privatelink.oms.opinsights.azure.com'
+  'privatelink.ods.opinsights.azure.com'
+  'privatelink.agentsvc.azure-automation.net'
+]
+var monitorPrivateDnsZoneNames = skip(privateDnsZoneNames, 5)
+
+resource natPublicIp 'Microsoft.Network/publicIPAddresses@2024-01-01' = {
+  name: 'pip-copilot-egress'
+  location: location
+  sku: { name: 'Standard' }
+  properties: {
+    publicIPAllocationMethod: 'Static'
+  }
+}
+
+resource natGateway 'Microsoft.Network/natGateways@2024-01-01' = {
+  name: 'nat-copilot-egress'
+  location: location
+  sku: { name: 'Standard' }
+  properties: {
+    idleTimeoutInMinutes: 10
+    publicIpAddresses: [
+      { id: natPublicIp.id }
+    ]
+  }
+}
 
 // VNet
 resource vnet 'Microsoft.Network/virtualNetworks@2024-01-01' = {
@@ -92,6 +137,7 @@ resource vnet 'Microsoft.Network/virtualNetworks@2024-01-01' = {
               }
             }
           ]
+          natGateway: { id: natGateway.id }
           defaultOutboundAccess: false
         }
       }
@@ -106,6 +152,21 @@ resource vnet 'Microsoft.Network/virtualNetworks@2024-01-01' = {
     ]
   }
 }
+
+resource privateDnsZones 'Microsoft.Network/privateDnsZones@2020-06-01' = [for zoneName in privateDnsZoneNames: {
+  name: zoneName
+  location: 'global'
+}]
+
+resource privateDnsZoneLinks 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = [for (zoneName, index) in privateDnsZoneNames: {
+  parent: privateDnsZones[index]
+  name: 'vnet-link'
+  location: 'global'
+  properties: {
+    registrationEnabled: false
+    virtualNetwork: { id: vnet.id }
+  }
+}]
 
 // Log Analytics Workspace
 resource law 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
@@ -330,6 +391,19 @@ resource peFuncInbound 'Microsoft.Network/privateEndpoints@2024-01-01' = {
   }
 }
 
+resource peFuncInboundDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-01-01' = {
+  parent: peFuncInbound
+  name: 'default'
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'sites'
+        properties: { privateDnsZoneId: privateDnsZones[0].id }
+      }
+    ]
+  }
+}
+
 // Audit storage blob PE
 resource peAuditBlob 'Microsoft.Network/privateEndpoints@2024-01-01' = {
   name: 'pe-storage-copilot-blob'
@@ -343,6 +417,19 @@ resource peAuditBlob 'Microsoft.Network/privateEndpoints@2024-01-01' = {
           privateLinkServiceId: auditStorage.id
           groupIds: ['blob']
         }
+      }
+    ]
+  }
+}
+
+resource peAuditBlobDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-01-01' = {
+  parent: peAuditBlob
+  name: 'default'
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'blob'
+        properties: { privateDnsZoneId: privateDnsZones[1].id }
       }
     ]
   }
@@ -366,6 +453,19 @@ resource peAuditDfs 'Microsoft.Network/privateEndpoints@2024-01-01' = {
   }
 }
 
+resource peAuditDfsDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-01-01' = {
+  parent: peAuditDfs
+  name: 'default'
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'dfs'
+        properties: { privateDnsZoneId: privateDnsZones[2].id }
+      }
+    ]
+  }
+}
+
 // Function storage blob PE
 resource peFuncBlob 'Microsoft.Network/privateEndpoints@2024-01-01' = {
   name: 'pe-func-storage-blob'
@@ -379,6 +479,19 @@ resource peFuncBlob 'Microsoft.Network/privateEndpoints@2024-01-01' = {
           privateLinkServiceId: funcStorage.id
           groupIds: ['blob']
         }
+      }
+    ]
+  }
+}
+
+resource peFuncBlobDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-01-01' = {
+  parent: peFuncBlob
+  name: 'default'
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'blob'
+        properties: { privateDnsZoneId: privateDnsZones[1].id }
       }
     ]
   }
@@ -402,6 +515,19 @@ resource peFuncQueue 'Microsoft.Network/privateEndpoints@2024-01-01' = {
   }
 }
 
+resource peFuncQueueDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-01-01' = {
+  parent: peFuncQueue
+  name: 'default'
+  properties: {
+    privateDnsZoneConfigs: [
+      {
+        name: 'queue'
+        properties: { privateDnsZoneId: privateDnsZones[3].id }
+      }
+    ]
+  }
+}
+
 // Function storage table PE
 resource peFuncTable 'Microsoft.Network/privateEndpoints@2024-01-01' = {
   name: 'pe-func-storage-table'
@@ -420,19 +546,14 @@ resource peFuncTable 'Microsoft.Network/privateEndpoints@2024-01-01' = {
   }
 }
 
-// DCE PE
-resource peDce 'Microsoft.Network/privateEndpoints@2024-01-01' = {
-  name: 'pe-dce-copilot'
-  location: location
+resource peFuncTableDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-01-01' = {
+  parent: peFuncTable
+  name: 'default'
   properties: {
-    subnet: { id: vnet.properties.subnets[2].id }
-    privateLinkServiceConnections: [
+    privateDnsZoneConfigs: [
       {
-        name: 'pe-dce-copilot'
-        properties: {
-          privateLinkServiceId: dce.id
-          groupIds: ['log']
-        }
+        name: 'table'
+        properties: { privateDnsZoneId: privateDnsZones[4].id }
       }
     ]
   }
@@ -466,6 +587,14 @@ resource amplsDce 'Microsoft.Insights/privateLinkScopes/scopedResources@2021-07-
   }
 }
 
+resource amplsAppInsights 'Microsoft.Insights/privateLinkScopes/scopedResources@2021-07-01-preview' = {
+  parent: ampls
+  name: 'scoped-app-insights'
+  properties: {
+    linkedResourceId: appInsights.id
+  }
+}
+
 resource peAmpls 'Microsoft.Network/privateEndpoints@2024-01-01' = {
   name: 'pe-ampls-copilot'
   location: location
@@ -480,6 +609,17 @@ resource peAmpls 'Microsoft.Network/privateEndpoints@2024-01-01' = {
         }
       }
     ]
+  }
+}
+
+resource peAmplsDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-01-01' = {
+  parent: peAmpls
+  name: 'default'
+  properties: {
+    privateDnsZoneConfigs: [for (zoneName, index) in monitorPrivateDnsZoneNames: {
+      name: 'monitor-${index + 5}'
+      properties: { privateDnsZoneId: privateDnsZones[index + 5].id }
+    }]
   }
 }
 

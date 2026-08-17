@@ -8,35 +8,41 @@
     Your Entra tenant ID
 .PARAMETER FunctionAppPrincipalId
     The system-assigned managed identity Object ID from the Function App (output of Bicep deployment)
+.PARAMETER CloudEnvironment
+    Target Microsoft 365 cloud environment.
 #>
 param(
     [Parameter(Mandatory)]
     [string]$TenantId,
 
     [Parameter(Mandatory)]
-    [string]$FunctionAppPrincipalId
+    [string]$FunctionAppPrincipalId,
+
+    [ValidateSet('Commercial', 'GCC', 'GCCHigh', 'DoD')]
+    [string]$CloudEnvironment = 'Commercial'
 )
 
 $ErrorActionPreference = 'Stop'
+$repoRoot = Split-Path $PSScriptRoot -Parent
+. (Join-Path (Join-Path $repoRoot 'function-app') 'CloudEnvironment.ps1')
+$cloud = Get-CloudEnvironmentConfiguration -CloudEnvironment $CloudEnvironment
 
 Write-Host "Connecting to Microsoft Graph..." -ForegroundColor Cyan
 Import-Module Microsoft.Graph.Applications -ErrorAction SilentlyContinue
-Connect-MgGraph -Scopes "AppRoleAssignment.ReadWrite.All" -TenantId $TenantId
+Connect-MgGraph -Scopes "AppRoleAssignment.ReadWrite.All" -TenantId $TenantId -Environment $cloud.GraphEnvironment
 
 Write-Host "Finding Office 365 Management APIs service principal..." -ForegroundColor Cyan
-$result = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=displayName eq 'Office 365 Management APIs'"
+$result = Invoke-MgGraphRequest -Method GET -Uri "$($cloud.GraphBaseUri)/v1.0/servicePrincipals?`$filter=displayName eq 'Office 365 Management APIs'"
 $managementApi = $result.value[0]
 
 if (-not $managementApi) {
-    Write-Host "Office 365 Management APIs SP not found. Registering..." -ForegroundColor Yellow
-    try {
-        Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/servicePrincipals" -Body @{ appId = "c5393580-f805-4401-95e8-94b7a6ef2fc2" }
-    } catch { }
-    $result = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=displayName eq 'Office 365 Management APIs'"
-    $managementApi = $result.value[0]
+    throw "Office 365 Management APIs service principal was not found in $CloudEnvironment. Add the Office 365 Management APIs enterprise application in this tenant, then rerun this script."
 }
 
 $role = $managementApi.appRoles | Where-Object { $_.value -eq "ActivityFeed.Read" }
+if (-not $role) {
+    throw "ActivityFeed.Read is not exposed by the Office 365 Management APIs service principal in $CloudEnvironment."
+}
 
 Write-Host "Assigning ActivityFeed.Read to Function App identity..." -ForegroundColor Cyan
 $body = @{
@@ -46,7 +52,7 @@ $body = @{
 }
 
 try {
-    Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/$FunctionAppPrincipalId/appRoleAssignments" -Body $body
+    Invoke-MgGraphRequest -Method POST -Uri "$($cloud.GraphBaseUri)/v1.0/servicePrincipals/$FunctionAppPrincipalId/appRoleAssignments" -Body $body
     Write-Host "ActivityFeed.Read assigned successfully." -ForegroundColor Green
 } catch {
     if ($_.Exception.Message -match "already exists") {

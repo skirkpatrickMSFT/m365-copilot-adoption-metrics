@@ -4,8 +4,8 @@
   "metadata": {
     "_generator": {
       "name": "bicep",
-      "version": "0.40.2.10011",
-      "templateHash": "10577298817257174685"
+      "version": "0.46.1.21595",
+      "templateHash": "2005083868098532401"
     }
   },
   "parameters": {
@@ -114,9 +114,44 @@
         "storageSuffix": "blob.core.usgovcloudapi.net"
       }
     },
-    "selectedCloud": "[variables('cloudEndpoints')[parameters('cloudEnvironment')]]"
+    "selectedCloud": "[variables('cloudEndpoints')[parameters('cloudEnvironment')]]",
+    "isAzureGovernment": "[contains(createArray('GCCHigh', 'DoD'), parameters('cloudEnvironment'))]",
+    "privateDnsZoneNames": "[if(variables('isAzureGovernment'), createArray('privatelink.azurewebsites.us', 'privatelink.blob.core.usgovcloudapi.net', 'privatelink.dfs.core.usgovcloudapi.net', 'privatelink.queue.core.usgovcloudapi.net', 'privatelink.table.core.usgovcloudapi.net', 'privatelink.monitor.azure.us', 'privatelink.adx.monitor.azure.us', 'privatelink.oms.opinsights.azure.us', 'privatelink.ods.opinsights.azure.us', 'privatelink.agentsvc.azure-automation.us'), createArray('privatelink.azurewebsites.net', 'privatelink.blob.core.windows.net', 'privatelink.dfs.core.windows.net', 'privatelink.queue.core.windows.net', 'privatelink.table.core.windows.net', 'privatelink.monitor.azure.com', 'privatelink.oms.opinsights.azure.com', 'privatelink.ods.opinsights.azure.com', 'privatelink.agentsvc.azure-automation.net'))]",
+    "monitorPrivateDnsZoneNames": "[skip(variables('privateDnsZoneNames'), 5)]"
   },
   "resources": [
+    {
+      "type": "Microsoft.Network/publicIPAddresses",
+      "apiVersion": "2024-01-01",
+      "name": "pip-copilot-egress",
+      "location": "[parameters('location')]",
+      "sku": {
+        "name": "Standard"
+      },
+      "properties": {
+        "publicIPAllocationMethod": "Static"
+      }
+    },
+    {
+      "type": "Microsoft.Network/natGateways",
+      "apiVersion": "2024-01-01",
+      "name": "nat-copilot-egress",
+      "location": "[parameters('location')]",
+      "sku": {
+        "name": "Standard"
+      },
+      "properties": {
+        "idleTimeoutInMinutes": 10,
+        "publicIpAddresses": [
+          {
+            "id": "[resourceId('Microsoft.Network/publicIPAddresses', 'pip-copilot-egress')]"
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/publicIPAddresses', 'pip-copilot-egress')]"
+      ]
+    },
     {
       "type": "Microsoft.Network/virtualNetworks",
       "apiVersion": "2024-01-01",
@@ -149,6 +184,9 @@
                   }
                 }
               ],
+              "natGateway": {
+                "id": "[resourceId('Microsoft.Network/natGateways', 'nat-copilot-egress')]"
+              },
               "defaultOutboundAccess": false
             }
           },
@@ -161,7 +199,40 @@
             }
           }
         ]
-      }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/natGateways', 'nat-copilot-egress')]"
+      ]
+    },
+    {
+      "copy": {
+        "name": "privateDnsZones",
+        "count": "[length(variables('privateDnsZoneNames'))]"
+      },
+      "type": "Microsoft.Network/privateDnsZones",
+      "apiVersion": "2020-06-01",
+      "name": "[variables('privateDnsZoneNames')[copyIndex()]]",
+      "location": "global"
+    },
+    {
+      "copy": {
+        "name": "privateDnsZoneLinks",
+        "count": "[length(variables('privateDnsZoneNames'))]"
+      },
+      "type": "Microsoft.Network/privateDnsZones/virtualNetworkLinks",
+      "apiVersion": "2020-06-01",
+      "name": "[format('{0}/{1}', variables('privateDnsZoneNames')[copyIndex()], 'vnet-link')]",
+      "location": "global",
+      "properties": {
+        "registrationEnabled": false,
+        "virtualNetwork": {
+          "id": "[resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName'))]"
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/privateDnsZones', variables('privateDnsZoneNames')[copyIndex()])]",
+        "[resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName'))]"
+      ]
     },
     {
       "type": "Microsoft.OperationalInsights/workspaces",
@@ -579,6 +650,25 @@
       ]
     },
     {
+      "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
+      "apiVersion": "2024-01-01",
+      "name": "[format('{0}/{1}', 'pe-func-copilot-inbound', 'default')]",
+      "properties": {
+        "privateDnsZoneConfigs": [
+          {
+            "name": "sites",
+            "properties": {
+              "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', variables('privateDnsZoneNames')[0])]"
+            }
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/privateEndpoints', 'pe-func-copilot-inbound')]",
+        "[resourceId('Microsoft.Network/privateDnsZones', variables('privateDnsZoneNames')[0])]"
+      ]
+    },
+    {
       "type": "Microsoft.Network/privateEndpoints",
       "apiVersion": "2024-01-01",
       "name": "pe-storage-copilot-blob",
@@ -602,6 +692,25 @@
       "dependsOn": [
         "[resourceId('Microsoft.Storage/storageAccounts', parameters('auditStorageName'))]",
         "[resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
+      "apiVersion": "2024-01-01",
+      "name": "[format('{0}/{1}', 'pe-storage-copilot-blob', 'default')]",
+      "properties": {
+        "privateDnsZoneConfigs": [
+          {
+            "name": "blob",
+            "properties": {
+              "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', variables('privateDnsZoneNames')[1])]"
+            }
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/privateEndpoints', 'pe-storage-copilot-blob')]",
+        "[resourceId('Microsoft.Network/privateDnsZones', variables('privateDnsZoneNames')[1])]"
       ]
     },
     {
@@ -631,6 +740,25 @@
       ]
     },
     {
+      "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
+      "apiVersion": "2024-01-01",
+      "name": "[format('{0}/{1}', 'pe-storage-copilot-dfs', 'default')]",
+      "properties": {
+        "privateDnsZoneConfigs": [
+          {
+            "name": "dfs",
+            "properties": {
+              "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', variables('privateDnsZoneNames')[2])]"
+            }
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/privateEndpoints', 'pe-storage-copilot-dfs')]",
+        "[resourceId('Microsoft.Network/privateDnsZones', variables('privateDnsZoneNames')[2])]"
+      ]
+    },
+    {
       "type": "Microsoft.Network/privateEndpoints",
       "apiVersion": "2024-01-01",
       "name": "pe-func-storage-blob",
@@ -654,6 +782,25 @@
       "dependsOn": [
         "[resourceId('Microsoft.Storage/storageAccounts', parameters('funcStorageName'))]",
         "[resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
+      "apiVersion": "2024-01-01",
+      "name": "[format('{0}/{1}', 'pe-func-storage-blob', 'default')]",
+      "properties": {
+        "privateDnsZoneConfigs": [
+          {
+            "name": "blob",
+            "properties": {
+              "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', variables('privateDnsZoneNames')[1])]"
+            }
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/privateEndpoints', 'pe-func-storage-blob')]",
+        "[resourceId('Microsoft.Network/privateDnsZones', variables('privateDnsZoneNames')[1])]"
       ]
     },
     {
@@ -683,6 +830,25 @@
       ]
     },
     {
+      "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
+      "apiVersion": "2024-01-01",
+      "name": "[format('{0}/{1}', 'pe-func-storage-queue', 'default')]",
+      "properties": {
+        "privateDnsZoneConfigs": [
+          {
+            "name": "queue",
+            "properties": {
+              "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', variables('privateDnsZoneNames')[3])]"
+            }
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/privateEndpoints', 'pe-func-storage-queue')]",
+        "[resourceId('Microsoft.Network/privateDnsZones', variables('privateDnsZoneNames')[3])]"
+      ]
+    },
+    {
       "type": "Microsoft.Network/privateEndpoints",
       "apiVersion": "2024-01-01",
       "name": "pe-func-storage-table",
@@ -709,29 +875,22 @@
       ]
     },
     {
-      "type": "Microsoft.Network/privateEndpoints",
+      "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
       "apiVersion": "2024-01-01",
-      "name": "pe-dce-copilot",
-      "location": "[parameters('location')]",
+      "name": "[format('{0}/{1}', 'pe-func-storage-table', 'default')]",
       "properties": {
-        "subnet": {
-          "id": "[reference(resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName')), '2024-01-01').subnets[2].id]"
-        },
-        "privateLinkServiceConnections": [
+        "privateDnsZoneConfigs": [
           {
-            "name": "pe-dce-copilot",
+            "name": "table",
             "properties": {
-              "privateLinkServiceId": "[resourceId('Microsoft.Insights/dataCollectionEndpoints', parameters('dceName'))]",
-              "groupIds": [
-                "log"
-              ]
+              "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', variables('privateDnsZoneNames')[4])]"
             }
           }
         ]
       },
       "dependsOn": [
-        "[resourceId('Microsoft.Insights/dataCollectionEndpoints', parameters('dceName'))]",
-        "[resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName'))]"
+        "[resourceId('Microsoft.Network/privateEndpoints', 'pe-func-storage-table')]",
+        "[resourceId('Microsoft.Network/privateDnsZones', variables('privateDnsZoneNames')[4])]"
       ]
     },
     {
@@ -771,6 +930,18 @@
       ]
     },
     {
+      "type": "Microsoft.Insights/privateLinkScopes/scopedResources",
+      "apiVersion": "2021-07-01-preview",
+      "name": "[format('{0}/{1}', 'ampls-copilot-adoption', 'scoped-app-insights')]",
+      "properties": {
+        "linkedResourceId": "[resourceId('Microsoft.Insights/components', parameters('funcAppName'))]"
+      },
+      "dependsOn": [
+        "[resourceId('microsoft.insights/privateLinkScopes', 'ampls-copilot-adoption')]",
+        "[resourceId('Microsoft.Insights/components', parameters('funcAppName'))]"
+      ]
+    },
+    {
       "type": "Microsoft.Network/privateEndpoints",
       "apiVersion": "2024-01-01",
       "name": "pe-ampls-copilot",
@@ -794,6 +965,29 @@
       "dependsOn": [
         "[resourceId('microsoft.insights/privateLinkScopes', 'ampls-copilot-adoption')]",
         "[resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
+      "apiVersion": "2024-01-01",
+      "name": "[format('{0}/{1}', 'pe-ampls-copilot', 'default')]",
+      "properties": {
+        "copy": [
+          {
+            "name": "privateDnsZoneConfigs",
+            "count": "[length(variables('monitorPrivateDnsZoneNames'))]",
+            "input": {
+              "name": "[format('monitor-{0}', add(copyIndex('privateDnsZoneConfigs'), 5))]",
+              "properties": {
+                "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', variables('privateDnsZoneNames')[add(copyIndex('privateDnsZoneConfigs'), 5)])]"
+              }
+            }
+          }
+        ]
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Network/privateEndpoints', 'pe-ampls-copilot')]",
+        "privateDnsZones"
       ]
     },
     {

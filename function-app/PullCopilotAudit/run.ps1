@@ -1,20 +1,23 @@
 param($Timer)
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path (Split-Path $PSScriptRoot -Parent) 'CloudEnvironment.ps1')
 
 # --- Configuration ---
+$cloudEnvironment = Get-ConfiguredValue -Value $env:CLOUD_ENVIRONMENT -DefaultValue 'Commercial'
+$cloud = Get-CloudEnvironmentConfiguration -CloudEnvironment $cloudEnvironment
 $tenantId       = $env:TENANT_ID
 $dceUri         = $env:DCE_INGESTION_URI
 $dcrId          = $env:DCR_IMMUTABLE_ID
 $streamName     = $env:STREAM_NAME
 $storageAccount = $env:STORAGE_ACCOUNT_NAME
-$container      = $env:STORAGE_CONTAINER_NAME ?? "copilot-logs"
-$windowMinutes  = [int]($env:TIME_WINDOW_MINUTES ?? "16")
+$container      = Get-ConfiguredValue -Value $env:STORAGE_CONTAINER_NAME -DefaultValue 'copilot-logs'
+$windowMinutes  = [int](Get-ConfiguredValue -Value $env:TIME_WINDOW_MINUTES -DefaultValue '16')
 $maxChunkSize   = 500
-$mgmtApiBase    = $env:MGMT_API_BASE ?? "https://manage.office.com"
-$monitorAudience = $env:MONITOR_AUDIENCE ?? "https://monitor.azure.com"
-$storageAudience = $env:STORAGE_AUDIENCE ?? "https://storage.azure.com"
-$storageSuffix  = $env:STORAGE_SUFFIX ?? "blob.core.windows.net"
+$mgmtApiBase    = Get-ConfiguredValue -Value $env:MGMT_API_BASE -DefaultValue $cloud.ManagementApi
+$monitorAudience = Get-ConfiguredValue -Value $env:MONITOR_AUDIENCE -DefaultValue $cloud.MonitorAudience
+$storageAudience = Get-ConfiguredValue -Value $env:STORAGE_AUDIENCE -DefaultValue $cloud.StorageAudience
+$storageSuffix  = Get-ConfiguredValue -Value $env:STORAGE_SUFFIX -DefaultValue $cloud.StorageSuffix
 
 $startTime = (Get-Date).ToUniversalTime().AddMinutes(-$windowMinutes).ToString("yyyy-MM-ddTHH:mm:ss")
 $endTime   = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss")

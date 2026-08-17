@@ -58,7 +58,7 @@ az deployment group create \
 Run locally (NOT in Cloud Shell — it cannot get tokens for manage.office.com):
 
 ```powershell
-.\scripts\Post-Deploy.ps1 -TenantId <your-tenant-id> -FunctionAppPrincipalId <from-deployment-output>
+.\scripts\Post-Deploy.ps1 -TenantId <your-tenant-id> -FunctionAppPrincipalId <from-deployment-output> -CloudEnvironment Commercial
 ```
 
 The Function App principal ID is in the deployment output as `functionAppPrincipalId`.
@@ -99,7 +99,7 @@ Function App → App files → select `profile.ps1` → replace with:
 
 Create a temporary timer function to activate the Management Activity API subscription:
 
-1. Function App → Functions → + Create → Timer trigger → Name: `StartSubscription` → Schedule: `0 */2 * * * *`
+1. Function App → Functions → + Create → Timer trigger → Name: `StartSubscription` → Schedule: `0 */15 * * * *`
 2. Paste contents of `function-app/StartSubscription/run.ps1` → Save
 3. Wait 2 minutes → check Application Insights logs for `"status":"enabled"`
 4. Delete the `StartSubscription` function after confirmation
@@ -130,19 +130,31 @@ Create a temporary timer function to activate the Management Activity API subscr
 
 The solution supports all Azure/M365 cloud environments via a single parameter:
 
-| Environment | `cloudEnvironment` value | Management API | Monitor Audience |
-|------------|-------------------------|----------------|-----------------|
-| Commercial | `Commercial` | manage.office.com | monitor.azure.com |
-| GCC | `GCC` | manage-gcc.office.com | monitor.azure.com |
-| GCC High | `GCCHigh` | manage.office365.us | monitor.azure.us |
-| DoD | `DoD` | manage.protection.apps.mil | monitor.azure.us |
+| Environment | `cloudEnvironment` value | Management API | Microsoft Graph environment |
+|------------|-------------------------|----------------|-----------------------------|
+| Commercial | `Commercial` | manage.office.com | Global |
+| GCC | `GCC` | manage-gcc.office.com | Global |
+| GCC High | `GCCHigh` | manage.office365.us | USGov |
+| DoD | `DoD` | manage.protection.apps.mil | USGovDoD |
 
 Set the `cloudEnvironment` parameter during deployment. The Bicep template automatically configures:
 - Function App environment variables for the correct API endpoints
-- Storage suffixes for the target cloud
+- Storage suffixes and private DNS zones for the target cloud
 - Monitor audience for the Logs Ingestion API
+- NAT Gateway egress for the public Management Activity API
 
 No manual code changes needed — the function code reads endpoints from environment variables.
+
+The function scripts and deployment scripts use syntax supported by Windows PowerShell 5.1 and PowerShell 7. Azure Functions v4 hosts the function worker on PowerShell 7.4; PowerShell 5.1 compatibility applies to local parsing, validation, and deployment scripts.
+
+For GCC High or DoD, select the Azure Government cloud before deployment:
+
+```powershell
+az cloud set --name AzureUSGovernment
+az login
+```
+
+Pass the same `cloudEnvironment` value to the infrastructure deployment and `Post-Deploy.ps1`. The Deploy to Azure portal button targets commercial Azure; use the Azure CLI deployment path for GCC High and DoD.
 
 ### CLI deployment for GCC High:
 
@@ -155,6 +167,17 @@ az deployment group create \
                auditStorageName=<name> \
                funcStorageName=<name>
 ```
+
+Then run the sovereign-cloud post-deployment step:
+
+```powershell
+.\scripts\Post-Deploy.ps1 `
+  -TenantId <your-tenant-id> `
+  -FunctionAppPrincipalId <from-deployment-output> `
+  -CloudEnvironment GCCHigh
+```
+
+For DoD, use `cloudEnvironment=DoD` and `-CloudEnvironment DoD`.
 
 ## Repo Structure
 
