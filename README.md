@@ -139,7 +139,7 @@ cd ..
 az functionapp update --resource-group rg-copilot-adoption --name <func-app-name> --set publicNetworkAccess=Disabled
 ```
 
-This deploys all three functions: `PullCopilotAudit`, `ExportAdoptionMetrics`, and `StartSubscription`.
+This deploys all four functions: `PullCopilotAudit`, `ExportAdoptionMetrics`, `PullSharePointAgents`, and `StartSubscription`.
 
 ### 5. Clear profile.ps1
 
@@ -203,6 +203,17 @@ Create these four lists at your SharePoint site. Column names must match exactly
 
 > To hide the Title column from view: column header → **Column settings → Hide in view**.
 
+**SharePointCopilotAgentRegistry** — running log of every Copilot agent created, updated automatically by `PullSharePointAgents`.
+
+| Column | Type |
+|--------|------|
+| Title | Single line of text (built-in — hide from view) |
+| AgentName | Single line of text |
+| SiteUrl | Single line of text |
+| AgentFileUrl | Single line of text |
+| CreatedBy | Single line of text |
+| CreatedDate | Date and time |
+
 ### 8. Add Function App Environment Variables
 
 Portal → Function App → **Settings → Environment variables** → + Add each:
@@ -214,6 +225,7 @@ Portal → Function App → **Settings → Environment variables** → + Add eac
 | `SHAREPOINT_APP_LIST` | `CopilotAppMetrics` |
 | `SHAREPOINT_WEEKLY_LIST` | `CopilotWeeklyMetrics` |
 | `SHAREPOINT_WEEKLY_APP_LIST` | `CopilotWeeklyAppMetrics` |
+| `SHAREPOINT_AGENT_LIST` | `SharePointCopilotAgentRegistry` |
 | `METRICS_LOOKBACK_DAYS` | `7` (set to a larger number for initial backfill) |
 | `METRICS_EXPORT_SCHEDULE` | `0 0 */4 * * *` (every 4 hours; adjust as needed) |
 
@@ -224,6 +236,8 @@ Click **Apply → Confirm** to restart the app.
 Trigger the initial export manually. Portal → **ExportAdoptionMetrics** → **Code + Test** → **Test/Run** → Run.
 
 For a historical backfill, first temporarily set `METRICS_LOOKBACK_DAYS` to cover your full data range (e.g. `90`), run once, then reset to `7`.
+
+**Agent registry (`SharePointCopilotAgentRegistry`):** Run `PullSharePointAgents` manually from Code + Test → Test/Run to trigger the initial `Audit.SharePoint` subscription and backfill any agents already created. If agents were created before deployment, temporarily set `TIME_WINDOW_MINUTES` to a large value (e.g. `500`) to cover the gap, then reset to `16`. Going forward, the registry updates automatically every 15 minutes — the function is append-only and will never overwrite existing entries.
 
 ### 10. Build the Canvas Power App (optional)
 
@@ -263,7 +277,8 @@ For the near-real-time Log Analytics dashboard:
 | 16-minute default window | Just over the 15-min interval; state tracking overrides after first run |
 | 24-hour cap on lookback | Office 365 Management API rejects windows > 24 h; auto-capped |
 | Incremental export design | `ExportAdoptionMetrics` only reads new blobs; SharePoint always receives a full historical snapshot from cache |
-| Delete-then-create (not upsert) | Avoids OData filter reliability issues; one bulk list read per export run |
+| Clear-all before rewrite | Eliminates duplicates unconditionally; title-based OData filters are unreliable on SharePoint REST |
+| Agent tracking via `Audit.SharePoint` | `FileUploaded` + `SourceFileExtension == agent` is the only reliable signal for agent creation; `TargetAgentName` only appears in `Audit.General` once a user actually interacts with the agent |
 
 ## Cloud Environment Support
 
@@ -318,6 +333,9 @@ m365-copilot-adoption-metrics/
 │   │   └── run.ps1
 │   ├── ExportAdoptionMetrics/       # Timer — aggregates ADLS data → SharePoint lists
 │   │   ├── function.json            # schedule: configurable via METRICS_EXPORT_SCHEDULE
+│   │   └── run.ps1
+│   ├── PullSharePointAgents/        # Timer — tracks .agent file uploads → SharePointCopilotAgentRegistry
+│   │   ├── function.json            # schedule: every 15 min
 │   │   └── run.ps1
 │   └── StartSubscription/           # One-time audit subscription activator
 │       ├── function.json
