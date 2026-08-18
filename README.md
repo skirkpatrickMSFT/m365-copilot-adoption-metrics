@@ -7,6 +7,23 @@ Two deployment paths are available:
 - **Deploy to Azure button** — one-click ARM deployment for Azure infrastructure, then follow the steps below
 - **Step-by-step guide** — see `Full_Implementation_Guide_No_Bicep.docx` for a complete walkthrough without Bicep
 
+## Deployment Modes
+
+The `deployLogAnalytics` parameter controls whether Log Analytics, Application Insights, and the AMPLS private endpoint are deployed. Both modes include the Function App, VNet, private endpoints, ADLS Gen2 audit storage, and the SharePoint Power App pipeline.
+
+| Component | Full (default) | Storage + SharePoint only |
+|-----------|:--------------:|:-------------------------:|
+| `deployLogAnalytics` | `true` | `false` |
+| ADLS Gen2 audit archive | ✓ | ✓ |
+| SharePoint Power App dashboard | ✓ | ✓ |
+| Log Analytics workspace | ✓ | — |
+| Data Collection Endpoint + Rule | ✓ | — |
+| Application Insights | ✓ | — |
+| AMPLS private endpoint | ✓ | — |
+| Azure Monitor Workbook | ✓ | — |
+
+Steps marked **(Log Analytics only)** below apply only to the full deployment.
+
 ## Architecture
 
 ```
@@ -19,14 +36,14 @@ Azure Function App (Premium EP1, PowerShell 7.4)
   • State-tracked processing — no duplicate events
   • VNet integrated + private endpoints throughout
         │
-   ┌────┴────────────────────┐
-   ▼                         ▼
-ADLS Gen2               Log Analytics
-(copilot-logs archive)  (CopilotAudit_CL)
-   │                         │
-   ▼                         ▼
-ExportAdoptionMetrics   Azure Monitor Workbook
-(every 4 h, incremental) (near-real-time KQL dashboard)
+   ┌────┴──────────────────────────────┐
+   ▼                                   ▼
+ADLS Gen2                    [Log Analytics only]
+(copilot-logs archive)        Log Analytics (CopilotAudit_CL)
+   │                               │
+   ▼                               ▼
+ExportAdoptionMetrics      Azure Monitor Workbook
+(every 4 h, incremental)   (near-real-time KQL dashboard)
    │
    ▼
 SharePoint Lists ──▶ Canvas Power App Dashboard
@@ -55,7 +72,7 @@ SharePoint Lists ──▶ Canvas Power App Dashboard
 
 > The Deploy to Azure button targets Commercial Azure. For GCC High / DoD, use the CLI path below.
 
-Or via CLI:
+**Full deployment (Log Analytics + SharePoint Power App):**
 
 ```bash
 az group create --name rg-copilot-adoption --location <region>
@@ -67,6 +84,19 @@ az deployment group create \
                auditStorageName=<globally-unique-name> \
                funcStorageName=<globally-unique-name> \
                sharepointSiteUrl=https://contoso.sharepoint.com/sites/CopilotReporting
+```
+
+**Storage + SharePoint only (skip Log Analytics):**
+
+```bash
+az deployment group create \
+  --resource-group rg-copilot-adoption \
+  --template-file infra/main.bicep \
+  --parameters tenantId=<your-tenant-id> \
+               auditStorageName=<globally-unique-name> \
+               funcStorageName=<globally-unique-name> \
+               sharepointSiteUrl=https://contoso.sharepoint.com/sites/CopilotReporting \
+               deployLogAnalytics=false
 ```
 
 ### 2. Grant API Permissions (post-deployment)
@@ -205,7 +235,9 @@ For a historical backfill, first temporarily set `METRICS_LOOKBACK_DAYS` to cove
 
 **Embed in SharePoint:** Edit page → **+** → search **Power Apps** web part → select your app → Republish.
 
-### 11. Import the Azure Monitor Workbook (optional)
+### 11. Import the Azure Monitor Workbook (Log Analytics only, optional)
+
+> Skip this step if you deployed with `deployLogAnalytics=false`.
 
 For the near-real-time Log Analytics dashboard:
 

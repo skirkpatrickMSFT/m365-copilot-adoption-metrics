@@ -3,5 +3,5 @@ local.settings.json
 deploy.zip
 *.zip
 .vscode/
-PullCopilotAudit/
+/PullCopilotAudit/
 Copilot_Telemetry_Extraction_Assessment_DoD_IL5.docx

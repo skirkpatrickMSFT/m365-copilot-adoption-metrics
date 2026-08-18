@@ -149,7 +149,7 @@ foreach ($blob in $allContentBlobs) {
 
     $ingestUri = "$dceUri/dataCollectionRules/$dcrId/streams/${streamName}?api-version=2023-01-01"
     if ([string]::IsNullOrWhiteSpace($dceUri) -or [string]::IsNullOrWhiteSpace($dcrId)) {
-        Write-Host "  Log Analytics not configured — skipping ingestion (storage-only mode)."
+        Write-Host "  Log Analytics not configured - skipping ingestion (storage-only mode)."
     } else {
     for ($i = 0; $i -lt $copilotEvents.Count; $i += $maxChunkSize) {
         $chunk = @($copilotEvents[$i..([Math]::Min($i + $maxChunkSize - 1, $copilotEvents.Count - 1))])
