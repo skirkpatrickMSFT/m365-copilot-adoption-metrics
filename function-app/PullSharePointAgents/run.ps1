@@ -74,14 +74,18 @@ $listApiBase = "$spSiteUrl/_api/web/lists/getbytitle('$agentList')/items"
 $readHdr     = @{ 'Authorization' = "Bearer $spToken"; 'Accept' = 'application/json;odata=nometadata' }
 $writeHdr    = @{ 'Authorization' = "Bearer $spToken"; 'Accept' = 'application/json;odata=nometadata'; 'Content-Type' = 'application/json;odata=nometadata' }
 
+# Fetch all existing AgentFileUrls once to deduplicate in-memory (OData filter unreliable)
+$existingUrls = [System.Collections.Generic.HashSet[string]]::new()
+$allItems = try { (Invoke-RestMethod -Uri "${listApiBase}?`$select=AgentFileUrl&`$top=5000" -Headers $readHdr).value } catch { @() }
+foreach ($item in @($allItems)) {
+    if ($item -and $item.AgentFileUrl) { $existingUrls.Add($item.AgentFileUrl) | Out-Null }
+}
+
 foreach ($evt in $agentEvents) {
     $agentName = [System.IO.Path]::GetFileNameWithoutExtension($evt.SourceFileName)
     $agentUrl  = $evt.ObjectId
 
-    # Skip if this exact file URL is already in the list
-    $escaped  = [System.Uri]::EscapeDataString(($agentUrl -replace "'", "''"))
-    $existing = try { (Invoke-RestMethod -Uri "${listApiBase}?`$filter=AgentFileUrl%20eq%20'${escaped}'&`$select=Id" -Headers $readHdr).value } catch { $null }
-    if ($existing -and @($existing).Count -gt 0) {
+    if ($existingUrls.Contains($agentUrl)) {
         Write-Host "  Already recorded: $agentName"
         continue
     }
