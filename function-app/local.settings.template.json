@@ -15,6 +15,13 @@
 		"MGMT_API_BASE": "",
 		"MONITOR_AUDIENCE": "",
 		"STORAGE_AUDIENCE": "",
-		"STORAGE_SUFFIX": ""
+		"STORAGE_SUFFIX": "",
+		"SHAREPOINT_SITE_URL": "",
+		"SHAREPOINT_DAILY_LIST": "CopilotDailyMetrics",
+		"SHAREPOINT_APP_LIST": "CopilotAppMetrics",
+		"SHAREPOINT_WEEKLY_LIST": "CopilotWeeklyMetrics",
+		"SHAREPOINT_WEEKLY_APP_LIST": "CopilotWeeklyAppMetrics",
+		"METRICS_LOOKBACK_DAYS": "7",
+		"METRICS_EXPORT_SCHEDULE": "0 0 */4 * * *"
 	}
 }

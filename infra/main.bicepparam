@@ -10,3 +10,7 @@ param lawName = 'law-copilot-adoption'
 param dceName = 'dce-copilot-audit'
 param vnetName = 'vnet-copilot-adoption'
 param tableName = 'CopilotAudit'
+// Optional: set to your SharePoint site URL to enable the Canvas Power App dashboard.
+// Example: https://contoso.sharepoint.com/sites/CopilotReporting
+param sharepointSiteUrl = ''
+param metricsLookbackDays = 7

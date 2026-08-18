@@ -31,6 +31,12 @@ try {
     $lastProcessed = Invoke-RestMethod -Uri $stateBlob -Headers @{ "Authorization" = "Bearer $stateToken"; "x-ms-version" = "2021-08-06" }
     if ($lastProcessed -and $lastProcessed.Trim().Length -gt 0) {
         $startTime = $lastProcessed.Trim()
+        # Office 365 Management API rejects windows older than 24 hours
+        $maxStart = (Get-Date).ToUniversalTime().AddHours(-23).ToString("yyyy-MM-ddTHH:mm:ss")
+        if ([datetime]$startTime -lt [datetime]$maxStart) {
+            Write-Warning "Last processed timestamp exceeds 24h limit. Capping to $maxStart"
+            $startTime = $maxStart
+        }
         Write-Host "Resuming from last processed: $startTime"
     }
 } catch {

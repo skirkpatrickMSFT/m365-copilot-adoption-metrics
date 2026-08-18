@@ -33,6 +33,12 @@ param vnetName string = 'vnet-copilot-adoption'
 @description('Custom table name (without _CL suffix)')
 param tableName string = 'CopilotAudit'
 
+@description('SharePoint site URL for the Canvas Power App dashboard (e.g. https://contoso.sharepoint.com/sites/CopilotReporting). Leave empty to skip the metrics export function.')
+param sharepointSiteUrl string = ''
+
+@description('Number of days to scan for unprocessed dates on first run or manual backfill.')
+param metricsLookbackDays int = 7
+
 // Cloud-specific endpoint mappings
 var cloudEndpoints = {
   Commercial: {
@@ -366,6 +372,13 @@ resource funcApp 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'MONITOR_AUDIENCE', value: selectedCloud.monitorAudience }
         { name: 'STORAGE_AUDIENCE', value: selectedCloud.storageAudience }
         { name: 'STORAGE_SUFFIX', value: selectedCloud.storageSuffix }
+        { name: 'SHAREPOINT_SITE_URL', value: sharepointSiteUrl }
+        { name: 'SHAREPOINT_DAILY_LIST', value: 'CopilotDailyMetrics' }
+        { name: 'SHAREPOINT_APP_LIST', value: 'CopilotAppMetrics' }
+        { name: 'SHAREPOINT_WEEKLY_LIST', value: 'CopilotWeeklyMetrics' }
+        { name: 'SHAREPOINT_WEEKLY_APP_LIST', value: 'CopilotWeeklyAppMetrics' }
+        { name: 'METRICS_LOOKBACK_DAYS', value: string(metricsLookbackDays) }
+        { name: 'METRICS_EXPORT_SCHEDULE', value: '0 0 */4 * * *' }
       ]
     }
   }

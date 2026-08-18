@@ -1,2 +1,7 @@
 node_modules/
 local.settings.json
+deploy.zip
+*.zip
+.vscode/
+PullCopilotAudit/
+Copilot_Telemetry_Extraction_Assessment_DoD_IL5.docx

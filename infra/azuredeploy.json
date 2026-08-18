@@ -1,11 +1,11 @@
-{
+﻿{
   "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
   "contentVersion": "1.0.0.0",
   "metadata": {
     "_generator": {
       "name": "bicep",
       "version": "0.46.1.21595",
-      "templateHash": "2005083868098532401"
+      "templateHash": "2784191114505549944"
     }
   },
   "parameters": {
@@ -84,6 +84,20 @@
       "defaultValue": "CopilotAudit",
       "metadata": {
         "description": "Custom table name (without _CL suffix)"
+      }
+    },
+    "sharepointSiteUrl": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "SharePoint site URL for the Canvas Power App dashboard (e.g. https://contoso.sharepoint.com/sites/CopilotReporting). Leave empty to skip the metrics export function."
+      }
+    },
+    "metricsLookbackDays": {
+      "type": "int",
+      "defaultValue": 7,
+      "metadata": {
+        "description": "Number of days to scan for unprocessed dates on first run or manual backfill."
       }
     }
   },
@@ -609,6 +623,34 @@
             {
               "name": "STORAGE_SUFFIX",
               "value": "[variables('selectedCloud').storageSuffix]"
+            },
+            {
+              "name": "SHAREPOINT_SITE_URL",
+              "value": "[parameters('sharepointSiteUrl')]"
+            },
+            {
+              "name": "SHAREPOINT_DAILY_LIST",
+              "value": "CopilotDailyMetrics"
+            },
+            {
+              "name": "SHAREPOINT_APP_LIST",
+              "value": "CopilotAppMetrics"
+            },
+            {
+              "name": "SHAREPOINT_WEEKLY_LIST",
+              "value": "CopilotWeeklyMetrics"
+            },
+            {
+              "name": "SHAREPOINT_WEEKLY_APP_LIST",
+              "value": "CopilotWeeklyAppMetrics"
+            },
+            {
+              "name": "METRICS_LOOKBACK_DAYS",
+              "value": "[string(parameters('metricsLookbackDays'))]"
+            },
+            {
+              "name": "METRICS_EXPORT_SCHEDULE",
+              "value": "0 0 */4 * * *"
             }
           ]
         }

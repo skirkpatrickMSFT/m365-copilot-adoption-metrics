@@ -1,0 +1,152 @@
+// ============================================================
+// DAX_Measures.dax
+// Paste each measure into Power BI Desktop via:
+//   Home → New Measure  (with your CopilotAudit table selected)
+//
+// Assumes the table loaded by either .pq query is named
+// "CopilotAudit". Rename references below if you used a
+// different table name.
+// ============================================================
+
+
+// ------------------------------------------------------------
+// Core counts
+// ------------------------------------------------------------
+
+Total Interactions =
+COUNTROWS ( CopilotAudit )
+
+Total Users =
+DISTINCTCOUNT ( CopilotAudit[UserId] )
+
+Total Conversations =
+DISTINCTCOUNT ( CopilotAudit[ConversationId] )
+
+Avg Interactions per User =
+DIVIDE ( [Total Interactions], [Total Users] )
+
+Avg Interactions per Conversation =
+DIVIDE ( [Total Interactions], [Total Conversations] )
+
+
+// ------------------------------------------------------------
+// Daily / Weekly / Monthly active users
+// DAU / WAU / MAU use a rolling window ending on the latest
+// date visible in the current filter context.
+// ------------------------------------------------------------
+
+DAU =
+CALCULATE (
+    DISTINCTCOUNT ( CopilotAudit[UserId] ),
+    DATESINPERIOD ( CopilotAudit[Date], LASTDATE ( CopilotAudit[Date] ), -1, DAY )
+)
+
+WAU =
+CALCULATE (
+    DISTINCTCOUNT ( CopilotAudit[UserId] ),
+    DATESINPERIOD ( CopilotAudit[Date], LASTDATE ( CopilotAudit[Date] ), -7, DAY )
+)
+
+MAU =
+CALCULATE (
+    DISTINCTCOUNT ( CopilotAudit[UserId] ),
+    DATESINPERIOD ( CopilotAudit[Date], LASTDATE ( CopilotAudit[Date] ), -30, DAY )
+)
+
+
+// ------------------------------------------------------------
+// Adoption — cumulative unique users over time
+// Use on a line / area chart with Date on the X-axis.
+// ------------------------------------------------------------
+
+Cumulative Users =
+VAR CurrentDate = MAX ( CopilotAudit[Date] )
+RETURN
+    CALCULATE (
+        DISTINCTCOUNT ( CopilotAudit[UserId] ),
+        FILTER ( ALL ( CopilotAudit ), CopilotAudit[Date] <= CurrentDate )
+    )
+
+New Users Today =
+VAR CurrentDate = MAX ( CopilotAudit[Date] )
+VAR PriorUsers =
+    CALCULATE (
+        DISTINCTCOUNT ( CopilotAudit[UserId] ),
+        FILTER ( ALL ( CopilotAudit ), CopilotAudit[Date] < CurrentDate )
+    )
+RETURN
+    [Cumulative Users] - PriorUsers
+
+
+// ------------------------------------------------------------
+// Engagement distribution — calculated column, not a measure.
+// Add as a Calculated Column on the CopilotAudit table, then
+// use it as an axis in a bar chart with [Total Users] as values.
+//
+// In Power BI Desktop: Table Tools → New Column
+// ------------------------------------------------------------
+
+// Engagement Bucket =
+// VAR UserInteractions =
+//     CALCULATE ( COUNTROWS ( CopilotAudit ), ALLEXCEPT ( CopilotAudit, CopilotAudit[UserId] ) )
+// RETURN
+//     SWITCH (
+//         TRUE (),
+//         UserInteractions <= 5,   "1 – 5",
+//         UserInteractions <= 20,  "6 – 20",
+//         UserInteractions <= 50,  "21 – 50",
+//         UserInteractions <= 100, "51 – 100",
+//         "100+"
+//     )
+//
+// NOTE: Because this is row-context dependent, it works best as a
+// calculated column.  Alternatively, pre-compute it in Power Query
+// using a grouped aggregation step.
+
+
+// ------------------------------------------------------------
+// Hour-of-day distribution
+// HourOfDay is already a column added by the .pq queries.
+// Use CopilotAudit[HourOfDay] as the axis and [Total Interactions]
+// as the value on a column chart.
+// ------------------------------------------------------------
+
+
+// ------------------------------------------------------------
+// Agent usage
+// ------------------------------------------------------------
+
+Agent Interactions =
+CALCULATE (
+    [Total Interactions],
+    CopilotAudit[TargetAgentName] <> ""
+        && NOT ISBLANK ( CopilotAudit[TargetAgentName] )
+)
+
+Agent Adoption Rate % =
+DIVIDE ( [Agent Interactions], [Total Interactions], 0 )
+
+
+// ------------------------------------------------------------
+// DLP / compliance
+// ------------------------------------------------------------
+
+DLP Deferred Interactions =
+CALCULATE (
+    [Total Interactions],
+    CopilotAudit[DLPEvaluationDeferred] = 1
+)
+
+DLP Deferred Rate % =
+DIVIDE ( [DLP Deferred Interactions], [Total Interactions], 0 )
+
+
+// ------------------------------------------------------------
+// Memory
+// ------------------------------------------------------------
+
+Memory Updated Interactions =
+CALCULATE (
+    [Total Interactions],
+    CopilotAudit[MemoryUpdated] = TRUE ()
+)
