@@ -21,7 +21,7 @@
 		"SHAREPOINT_APP_LIST": "CopilotAppMetrics",
 		"SHAREPOINT_WEEKLY_LIST": "CopilotWeeklyMetrics",
 		"SHAREPOINT_WEEKLY_APP_LIST": "CopilotWeeklyAppMetrics",
-		"SHAREPOINT_AGENT_LIST": "CopilotAgentRegistry",
+		"SHAREPOINT_AGENT_LIST": "SharePointCopilotAgentRegistry",
 		"METRICS_LOOKBACK_DAYS": "7",
 		"METRICS_EXPORT_SCHEDULE": "0 0 */4 * * *"
 	}

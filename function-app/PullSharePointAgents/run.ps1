@@ -8,7 +8,7 @@ $cloud            = Get-CloudEnvironmentConfiguration -CloudEnvironment $cloudEn
 $tenantId         = $env:TENANT_ID
 $mgmtApiBase      = Get-ConfiguredValue -Value $env:MGMT_API_BASE     -DefaultValue $cloud.ManagementApi
 $spSiteUrl        = $env:SHAREPOINT_SITE_URL
-$agentList        = Get-ConfiguredValue -Value $env:SHAREPOINT_AGENT_LIST -DefaultValue 'CopilotAgentRegistry'
+$agentList        = Get-ConfiguredValue -Value $env:SHAREPOINT_AGENT_LIST -DefaultValue 'SharePointCopilotAgentRegistry'
 $windowMinutes    = [int](Get-ConfiguredValue -Value $env:TIME_WINDOW_MINUTES -DefaultValue '16')
 
 if ([string]::IsNullOrWhiteSpace($spSiteUrl)) {

@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.46.1.21595",
-      "templateHash": "7120726856230769665"
+      "templateHash": "8971864196708207130"
     }
   },
   "parameters": {
@@ -659,7 +659,7 @@
             },
             {
               "name": "SHAREPOINT_AGENT_LIST",
-              "value": "CopilotAgentRegistry"
+              "value": "SharePointCopilotAgentRegistry"
             },
             {
               "name": "METRICS_LOOKBACK_DAYS",
