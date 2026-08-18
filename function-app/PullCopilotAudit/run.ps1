@@ -148,6 +148,9 @@ foreach ($blob in $allContentBlobs) {
     }
 
     $ingestUri = "$dceUri/dataCollectionRules/$dcrId/streams/${streamName}?api-version=2023-01-01"
+    if ([string]::IsNullOrWhiteSpace($dceUri) -or [string]::IsNullOrWhiteSpace($dcrId)) {
+        Write-Host "  Log Analytics not configured — skipping ingestion (storage-only mode)."
+    } else {
     for ($i = 0; $i -lt $copilotEvents.Count; $i += $maxChunkSize) {
         $chunk = @($copilotEvents[$i..([Math]::Min($i + $maxChunkSize - 1, $copilotEvents.Count - 1))])
         $chunkJson = $chunk | ConvertTo-Json -Depth 20 -Compress
@@ -157,6 +160,7 @@ foreach ($blob in $allContentBlobs) {
             Write-Host "  Sent chunk of $($chunk.Count) events to Log Analytics"
         }
         catch { Write-Warning "  Failed to send to Log Analytics: $($_.Exception.Message)" }
+    }
     }
 }
 

@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.46.1.21595",
-      "templateHash": "2784191114505549944"
+      "templateHash": "10145207741276436361"
     }
   },
   "parameters": {
@@ -99,6 +99,13 @@
       "metadata": {
         "description": "Number of days to scan for unprocessed dates on first run or manual backfill."
       }
+    },
+    "deployLogAnalytics": {
+      "type": "bool",
+      "defaultValue": true,
+      "metadata": {
+        "description": "Deploy Log Analytics workspace, DCE, DCR, and Application Insights. Set to false for a storage-only deployment that uses only the SharePoint Power App dashboard."
+      }
     }
   },
   "variables": {
@@ -131,7 +138,8 @@
     "selectedCloud": "[variables('cloudEndpoints')[parameters('cloudEnvironment')]]",
     "isAzureGovernment": "[contains(createArray('GCCHigh', 'DoD'), parameters('cloudEnvironment'))]",
     "privateDnsZoneNames": "[if(variables('isAzureGovernment'), createArray('privatelink.azurewebsites.us', 'privatelink.blob.core.usgovcloudapi.net', 'privatelink.dfs.core.usgovcloudapi.net', 'privatelink.queue.core.usgovcloudapi.net', 'privatelink.table.core.usgovcloudapi.net', 'privatelink.monitor.azure.us', 'privatelink.adx.monitor.azure.us', 'privatelink.oms.opinsights.azure.us', 'privatelink.ods.opinsights.azure.us', 'privatelink.agentsvc.azure-automation.us'), createArray('privatelink.azurewebsites.net', 'privatelink.blob.core.windows.net', 'privatelink.dfs.core.windows.net', 'privatelink.queue.core.windows.net', 'privatelink.table.core.windows.net', 'privatelink.monitor.azure.com', 'privatelink.oms.opinsights.azure.com', 'privatelink.ods.opinsights.azure.com', 'privatelink.agentsvc.azure-automation.net'))]",
-    "monitorPrivateDnsZoneNames": "[skip(variables('privateDnsZoneNames'), 5)]"
+    "monitorPrivateDnsZoneNames": "[skip(variables('privateDnsZoneNames'), 5)]",
+    "activeDnsZoneNames": "[if(parameters('deployLogAnalytics'), variables('privateDnsZoneNames'), take(variables('privateDnsZoneNames'), 5))]"
   },
   "resources": [
     {
@@ -221,21 +229,21 @@
     {
       "copy": {
         "name": "privateDnsZones",
-        "count": "[length(variables('privateDnsZoneNames'))]"
+        "count": "[length(variables('activeDnsZoneNames'))]"
       },
       "type": "Microsoft.Network/privateDnsZones",
       "apiVersion": "2020-06-01",
-      "name": "[variables('privateDnsZoneNames')[copyIndex()]]",
+      "name": "[variables('activeDnsZoneNames')[copyIndex()]]",
       "location": "global"
     },
     {
       "copy": {
         "name": "privateDnsZoneLinks",
-        "count": "[length(variables('privateDnsZoneNames'))]"
+        "count": "[length(variables('activeDnsZoneNames'))]"
       },
       "type": "Microsoft.Network/privateDnsZones/virtualNetworkLinks",
       "apiVersion": "2020-06-01",
-      "name": "[format('{0}/{1}', variables('privateDnsZoneNames')[copyIndex()], 'vnet-link')]",
+      "name": "[format('{0}/{1}', variables('activeDnsZoneNames')[copyIndex()], 'vnet-link')]",
       "location": "global",
       "properties": {
         "registrationEnabled": false,
@@ -244,11 +252,12 @@
         }
       },
       "dependsOn": [
-        "[resourceId('Microsoft.Network/privateDnsZones', variables('privateDnsZoneNames')[copyIndex()])]",
+        "[resourceId('Microsoft.Network/privateDnsZones', variables('activeDnsZoneNames')[copyIndex()])]",
         "[resourceId('Microsoft.Network/virtualNetworks', parameters('vnetName'))]"
       ]
     },
     {
+      "condition": "[parameters('deployLogAnalytics')]",
       "type": "Microsoft.OperationalInsights/workspaces",
       "apiVersion": "2023-09-01",
       "name": "[parameters('lawName')]",
@@ -261,6 +270,7 @@
       }
     },
     {
+      "condition": "[parameters('deployLogAnalytics')]",
       "type": "Microsoft.Insights/dataCollectionEndpoints",
       "apiVersion": "2022-06-01",
       "name": "[parameters('dceName')]",
@@ -272,6 +282,7 @@
       }
     },
     {
+      "condition": "[parameters('deployLogAnalytics')]",
       "type": "Microsoft.OperationalInsights/workspaces/tables",
       "apiVersion": "2022-10-01",
       "name": "[format('{0}/{1}', parameters('lawName'), format('{0}_CL', parameters('tableName')))]",
@@ -356,6 +367,7 @@
       ]
     },
     {
+      "condition": "[parameters('deployLogAnalytics')]",
       "type": "Microsoft.Insights/dataCollectionRules",
       "apiVersion": "2022-06-01",
       "name": "dcr-copilot-audit",
@@ -524,6 +536,7 @@
       }
     },
     {
+      "condition": "[parameters('deployLogAnalytics')]",
       "type": "Microsoft.Insights/components",
       "apiVersion": "2020-02-02",
       "name": "[parameters('funcAppName')]",
@@ -574,7 +587,7 @@
             },
             {
               "name": "APPLICATIONINSIGHTS_CONNECTION_STRING",
-              "value": "[reference(resourceId('Microsoft.Insights/components', parameters('funcAppName')), '2020-02-02').ConnectionString]"
+              "value": "[if(parameters('deployLogAnalytics'), reference(resourceId('Microsoft.Insights/components', parameters('funcAppName')), '2020-02-02').ConnectionString, '')]"
             },
             {
               "name": "TENANT_ID",
@@ -582,15 +595,15 @@
             },
             {
               "name": "DCE_INGESTION_URI",
-              "value": "[reference(resourceId('Microsoft.Insights/dataCollectionEndpoints', parameters('dceName')), '2022-06-01').logsIngestion.endpoint]"
+              "value": "[if(parameters('deployLogAnalytics'), reference(resourceId('Microsoft.Insights/dataCollectionEndpoints', parameters('dceName')), '2022-06-01').logsIngestion.endpoint, '')]"
             },
             {
               "name": "DCR_IMMUTABLE_ID",
-              "value": "[reference(resourceId('Microsoft.Insights/dataCollectionRules', 'dcr-copilot-audit'), '2022-06-01').immutableId]"
+              "value": "[if(parameters('deployLogAnalytics'), reference(resourceId('Microsoft.Insights/dataCollectionRules', 'dcr-copilot-audit'), '2022-06-01').immutableId, '')]"
             },
             {
               "name": "STREAM_NAME",
-              "value": "[format('Custom-{0}_CL', parameters('tableName'))]"
+              "value": "[if(parameters('deployLogAnalytics'), format('Custom-{0}_CL', parameters('tableName')), '')]"
             },
             {
               "name": "STORAGE_ACCOUNT_NAME",
@@ -700,14 +713,14 @@
           {
             "name": "sites",
             "properties": {
-              "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', variables('privateDnsZoneNames')[0])]"
+              "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', variables('activeDnsZoneNames')[0])]"
             }
           }
         ]
       },
       "dependsOn": [
         "[resourceId('Microsoft.Network/privateEndpoints', 'pe-func-copilot-inbound')]",
-        "[resourceId('Microsoft.Network/privateDnsZones', variables('privateDnsZoneNames')[0])]"
+        "[resourceId('Microsoft.Network/privateDnsZones', variables('activeDnsZoneNames')[0])]"
       ]
     },
     {
@@ -745,14 +758,14 @@
           {
             "name": "blob",
             "properties": {
-              "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', variables('privateDnsZoneNames')[1])]"
+              "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', variables('activeDnsZoneNames')[1])]"
             }
           }
         ]
       },
       "dependsOn": [
         "[resourceId('Microsoft.Network/privateEndpoints', 'pe-storage-copilot-blob')]",
-        "[resourceId('Microsoft.Network/privateDnsZones', variables('privateDnsZoneNames')[1])]"
+        "[resourceId('Microsoft.Network/privateDnsZones', variables('activeDnsZoneNames')[1])]"
       ]
     },
     {
@@ -790,14 +803,14 @@
           {
             "name": "dfs",
             "properties": {
-              "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', variables('privateDnsZoneNames')[2])]"
+              "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', variables('activeDnsZoneNames')[2])]"
             }
           }
         ]
       },
       "dependsOn": [
         "[resourceId('Microsoft.Network/privateEndpoints', 'pe-storage-copilot-dfs')]",
-        "[resourceId('Microsoft.Network/privateDnsZones', variables('privateDnsZoneNames')[2])]"
+        "[resourceId('Microsoft.Network/privateDnsZones', variables('activeDnsZoneNames')[2])]"
       ]
     },
     {
@@ -835,14 +848,14 @@
           {
             "name": "blob",
             "properties": {
-              "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', variables('privateDnsZoneNames')[1])]"
+              "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', variables('activeDnsZoneNames')[1])]"
             }
           }
         ]
       },
       "dependsOn": [
         "[resourceId('Microsoft.Network/privateEndpoints', 'pe-func-storage-blob')]",
-        "[resourceId('Microsoft.Network/privateDnsZones', variables('privateDnsZoneNames')[1])]"
+        "[resourceId('Microsoft.Network/privateDnsZones', variables('activeDnsZoneNames')[1])]"
       ]
     },
     {
@@ -880,14 +893,14 @@
           {
             "name": "queue",
             "properties": {
-              "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', variables('privateDnsZoneNames')[3])]"
+              "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', variables('activeDnsZoneNames')[3])]"
             }
           }
         ]
       },
       "dependsOn": [
         "[resourceId('Microsoft.Network/privateEndpoints', 'pe-func-storage-queue')]",
-        "[resourceId('Microsoft.Network/privateDnsZones', variables('privateDnsZoneNames')[3])]"
+        "[resourceId('Microsoft.Network/privateDnsZones', variables('activeDnsZoneNames')[3])]"
       ]
     },
     {
@@ -925,17 +938,18 @@
           {
             "name": "table",
             "properties": {
-              "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', variables('privateDnsZoneNames')[4])]"
+              "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', variables('activeDnsZoneNames')[4])]"
             }
           }
         ]
       },
       "dependsOn": [
         "[resourceId('Microsoft.Network/privateEndpoints', 'pe-func-storage-table')]",
-        "[resourceId('Microsoft.Network/privateDnsZones', variables('privateDnsZoneNames')[4])]"
+        "[resourceId('Microsoft.Network/privateDnsZones', variables('activeDnsZoneNames')[4])]"
       ]
     },
     {
+      "condition": "[parameters('deployLogAnalytics')]",
       "type": "microsoft.insights/privateLinkScopes",
       "apiVersion": "2021-07-01-preview",
       "name": "ampls-copilot-adoption",
@@ -948,6 +962,7 @@
       }
     },
     {
+      "condition": "[parameters('deployLogAnalytics')]",
       "type": "Microsoft.Insights/privateLinkScopes/scopedResources",
       "apiVersion": "2021-07-01-preview",
       "name": "[format('{0}/{1}', 'ampls-copilot-adoption', 'scoped-law')]",
@@ -960,6 +975,7 @@
       ]
     },
     {
+      "condition": "[parameters('deployLogAnalytics')]",
       "type": "Microsoft.Insights/privateLinkScopes/scopedResources",
       "apiVersion": "2021-07-01-preview",
       "name": "[format('{0}/{1}', 'ampls-copilot-adoption', 'scoped-dce')]",
@@ -972,6 +988,7 @@
       ]
     },
     {
+      "condition": "[parameters('deployLogAnalytics')]",
       "type": "Microsoft.Insights/privateLinkScopes/scopedResources",
       "apiVersion": "2021-07-01-preview",
       "name": "[format('{0}/{1}', 'ampls-copilot-adoption', 'scoped-app-insights')]",
@@ -984,6 +1001,7 @@
       ]
     },
     {
+      "condition": "[parameters('deployLogAnalytics')]",
       "type": "Microsoft.Network/privateEndpoints",
       "apiVersion": "2024-01-01",
       "name": "pe-ampls-copilot",
@@ -1010,6 +1028,7 @@
       ]
     },
     {
+      "condition": "[parameters('deployLogAnalytics')]",
       "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
       "apiVersion": "2024-01-01",
       "name": "[format('{0}/{1}', 'pe-ampls-copilot', 'default')]",
@@ -1021,7 +1040,7 @@
             "input": {
               "name": "[format('monitor-{0}', add(copyIndex('privateDnsZoneConfigs'), 5))]",
               "properties": {
-                "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', variables('privateDnsZoneNames')[add(copyIndex('privateDnsZoneConfigs'), 5)])]"
+                "privateDnsZoneId": "[resourceId('Microsoft.Network/privateDnsZones', variables('activeDnsZoneNames')[add(copyIndex('privateDnsZoneConfigs'), 5)])]"
               }
             }
           }
@@ -1033,6 +1052,7 @@
       ]
     },
     {
+      "condition": "[parameters('deployLogAnalytics')]",
       "type": "Microsoft.Authorization/roleAssignments",
       "apiVersion": "2022-04-01",
       "scope": "[resourceId('Microsoft.Insights/dataCollectionRules', 'dcr-copilot-audit')]",
@@ -1119,19 +1139,19 @@
     },
     "dceIngestionUri": {
       "type": "string",
-      "value": "[reference(resourceId('Microsoft.Insights/dataCollectionEndpoints', parameters('dceName')), '2022-06-01').logsIngestion.endpoint]"
+      "value": "[if(parameters('deployLogAnalytics'), reference(resourceId('Microsoft.Insights/dataCollectionEndpoints', parameters('dceName')), '2022-06-01').logsIngestion.endpoint, '')]"
     },
     "dcrImmutableId": {
       "type": "string",
-      "value": "[reference(resourceId('Microsoft.Insights/dataCollectionRules', 'dcr-copilot-audit'), '2022-06-01').immutableId]"
+      "value": "[if(parameters('deployLogAnalytics'), reference(resourceId('Microsoft.Insights/dataCollectionRules', 'dcr-copilot-audit'), '2022-06-01').immutableId, '')]"
     },
     "streamName": {
       "type": "string",
-      "value": "[format('Custom-{0}_CL', parameters('tableName'))]"
+      "value": "[if(parameters('deployLogAnalytics'), format('Custom-{0}_CL', parameters('tableName')), '')]"
     },
     "lawWorkspaceId": {
       "type": "string",
-      "value": "[reference(resourceId('Microsoft.OperationalInsights/workspaces', parameters('lawName')), '2023-09-01').customerId]"
+      "value": "[if(parameters('deployLogAnalytics'), reference(resourceId('Microsoft.OperationalInsights/workspaces', parameters('lawName')), '2023-09-01').customerId, '')]"
     },
     "auditStorageName": {
       "type": "string",

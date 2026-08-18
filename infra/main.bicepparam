@@ -14,3 +14,5 @@ param tableName = 'CopilotAudit'
 // Example: https://contoso.sharepoint.com/sites/CopilotReporting
 param sharepointSiteUrl = ''
 param metricsLookbackDays = 7
+// Set to false to skip Log Analytics, DCE, DCR, and Application Insights (storage + SharePoint only)
+param deployLogAnalytics = true

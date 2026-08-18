@@ -39,6 +39,9 @@ param sharepointSiteUrl string = ''
 @description('Number of days to scan for unprocessed dates on first run or manual backfill.')
 param metricsLookbackDays int = 7
 
+@description('Deploy Log Analytics workspace, DCE, DCR, and Application Insights. Set to false for a storage-only deployment that uses only the SharePoint Power App dashboard.')
+param deployLogAnalytics bool = true
+
 // Cloud-specific endpoint mappings
 var cloudEndpoints = {
   Commercial: {
@@ -92,6 +95,8 @@ var privateDnsZoneNames = isAzureGovernment ? [
   'privatelink.agentsvc.azure-automation.net'
 ]
 var monitorPrivateDnsZoneNames = skip(privateDnsZoneNames, 5)
+// When Log Analytics is not deployed, only create the 5 storage/function DNS zones
+var activeDnsZoneNames = deployLogAnalytics ? privateDnsZoneNames : take(privateDnsZoneNames, 5)
 
 resource natPublicIp 'Microsoft.Network/publicIPAddresses@2024-01-01' = {
   name: 'pip-copilot-egress'
@@ -159,12 +164,12 @@ resource vnet 'Microsoft.Network/virtualNetworks@2024-01-01' = {
   }
 }
 
-resource privateDnsZones 'Microsoft.Network/privateDnsZones@2020-06-01' = [for zoneName in privateDnsZoneNames: {
+resource privateDnsZones 'Microsoft.Network/privateDnsZones@2020-06-01' = [for zoneName in activeDnsZoneNames: {
   name: zoneName
   location: 'global'
 }]
 
-resource privateDnsZoneLinks 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = [for (zoneName, index) in privateDnsZoneNames: {
+resource privateDnsZoneLinks 'Microsoft.Network/privateDnsZones/virtualNetworkLinks@2020-06-01' = [for (zoneName, index) in activeDnsZoneNames: {
   parent: privateDnsZones[index]
   name: 'vnet-link'
   location: 'global'
@@ -175,7 +180,7 @@ resource privateDnsZoneLinks 'Microsoft.Network/privateDnsZones/virtualNetworkLi
 }]
 
 // Log Analytics Workspace
-resource law 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
+resource law 'Microsoft.OperationalInsights/workspaces@2023-09-01' = if (deployLogAnalytics) {
   name: lawName
   location: location
   properties: {
@@ -187,7 +192,7 @@ resource law 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
 }
 
 // Data Collection Endpoint
-resource dce 'Microsoft.Insights/dataCollectionEndpoints@2022-06-01' = {
+resource dce 'Microsoft.Insights/dataCollectionEndpoints@2022-06-01' = if (deployLogAnalytics) {
   name: dceName
   location: location
   properties: {
@@ -198,7 +203,7 @@ resource dce 'Microsoft.Insights/dataCollectionEndpoints@2022-06-01' = {
 }
 
 // Custom table
-resource customTable 'Microsoft.OperationalInsights/workspaces/tables@2022-10-01' = {
+resource customTable 'Microsoft.OperationalInsights/workspaces/tables@2022-10-01' = if (deployLogAnalytics) {
   parent: law
   name: '${tableName}_CL'
   properties: {
@@ -229,7 +234,7 @@ resource customTable 'Microsoft.OperationalInsights/workspaces/tables@2022-10-01
 }
 
 // Data Collection Rule
-resource dcr 'Microsoft.Insights/dataCollectionRules@2022-06-01' = {
+resource dcr 'Microsoft.Insights/dataCollectionRules@2022-06-01' = if (deployLogAnalytics) {
   name: 'dcr-copilot-audit'
   location: location
   dependsOn: [customTable]
@@ -327,7 +332,7 @@ resource asp 'Microsoft.Web/serverfarms@2023-12-01' = {
 }
 
 // Application Insights
-resource appInsights 'Microsoft.Insights/components@2020-02-02' = {
+resource appInsights 'Microsoft.Insights/components@2020-02-02' = if (deployLogAnalytics) {
   name: funcAppName
   location: location
   kind: 'web'
@@ -359,11 +364,11 @@ resource funcApp 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'FUNCTIONS_WORKER_RUNTIME', value: 'powershell' }
         { name: 'AzureWebJobsStorage__accountName', value: funcStorage.name }
         { name: 'AzureWebJobsStorage__credential', value: 'managedidentity' }
-        { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: appInsights.properties.ConnectionString }
+        { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: deployLogAnalytics ? appInsights.properties.ConnectionString : '' }
         { name: 'TENANT_ID', value: tenantId }
-        { name: 'DCE_INGESTION_URI', value: dce.properties.logsIngestion.endpoint }
-        { name: 'DCR_IMMUTABLE_ID', value: dcr.properties.immutableId }
-        { name: 'STREAM_NAME', value: 'Custom-${tableName}_CL' }
+        { name: 'DCE_INGESTION_URI', value: deployLogAnalytics ? dce.properties.logsIngestion.endpoint : '' }
+        { name: 'DCR_IMMUTABLE_ID', value: deployLogAnalytics ? dcr.properties.immutableId : '' }
+        { name: 'STREAM_NAME', value: deployLogAnalytics ? 'Custom-${tableName}_CL' : '' }
         { name: 'STORAGE_ACCOUNT_NAME', value: auditStorage.name }
         { name: 'STORAGE_CONTAINER_NAME', value: 'copilot-logs' }
         { name: 'TIME_WINDOW_MINUTES', value: '16' }
@@ -573,7 +578,7 @@ resource peFuncTableDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups
 }
 
 // AMPLS
-resource ampls 'Microsoft.Insights/privateLinkScopes@2021-07-01-preview' = {
+resource ampls 'Microsoft.Insights/privateLinkScopes@2021-07-01-preview' = if (deployLogAnalytics) {
   name: 'ampls-copilot-adoption'
   location: 'global'
   properties: {
@@ -584,7 +589,7 @@ resource ampls 'Microsoft.Insights/privateLinkScopes@2021-07-01-preview' = {
   }
 }
 
-resource amplsLaw 'Microsoft.Insights/privateLinkScopes/scopedResources@2021-07-01-preview' = {
+resource amplsLaw 'Microsoft.Insights/privateLinkScopes/scopedResources@2021-07-01-preview' = if (deployLogAnalytics) {
   parent: ampls
   name: 'scoped-law'
   properties: {
@@ -592,7 +597,7 @@ resource amplsLaw 'Microsoft.Insights/privateLinkScopes/scopedResources@2021-07-
   }
 }
 
-resource amplsDce 'Microsoft.Insights/privateLinkScopes/scopedResources@2021-07-01-preview' = {
+resource amplsDce 'Microsoft.Insights/privateLinkScopes/scopedResources@2021-07-01-preview' = if (deployLogAnalytics) {
   parent: ampls
   name: 'scoped-dce'
   properties: {
@@ -600,7 +605,7 @@ resource amplsDce 'Microsoft.Insights/privateLinkScopes/scopedResources@2021-07-
   }
 }
 
-resource amplsAppInsights 'Microsoft.Insights/privateLinkScopes/scopedResources@2021-07-01-preview' = {
+resource amplsAppInsights 'Microsoft.Insights/privateLinkScopes/scopedResources@2021-07-01-preview' = if (deployLogAnalytics) {
   parent: ampls
   name: 'scoped-app-insights'
   properties: {
@@ -608,7 +613,7 @@ resource amplsAppInsights 'Microsoft.Insights/privateLinkScopes/scopedResources@
   }
 }
 
-resource peAmpls 'Microsoft.Network/privateEndpoints@2024-01-01' = {
+resource peAmpls 'Microsoft.Network/privateEndpoints@2024-01-01' = if (deployLogAnalytics) {
   name: 'pe-ampls-copilot'
   location: location
   properties: {
@@ -625,7 +630,7 @@ resource peAmpls 'Microsoft.Network/privateEndpoints@2024-01-01' = {
   }
 }
 
-resource peAmplsDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-01-01' = {
+resource peAmplsDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@2024-01-01' = if (deployLogAnalytics) {
   parent: peAmpls
   name: 'default'
   properties: {
@@ -639,7 +644,7 @@ resource peAmplsDns 'Microsoft.Network/privateEndpoints/privateDnsZoneGroups@202
 // Role assignments
 
 // Monitoring Metrics Publisher on DCR for Function App
-resource roleMonitorPublisher 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource roleMonitorPublisher 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (deployLogAnalytics) {
   name: guid(dcr.id, funcApp.id, '3913510d-42f4-4e42-8a64-420c390055eb')
   scope: dcr
   properties: {
@@ -696,9 +701,9 @@ resource roleFuncTable 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
 // Outputs
 output functionAppName string = funcApp.name
 output functionAppPrincipalId string = funcApp.identity.principalId
-output dceIngestionUri string = dce.properties.logsIngestion.endpoint
-output dcrImmutableId string = dcr.properties.immutableId
-output streamName string = 'Custom-${tableName}_CL'
-output lawWorkspaceId string = law.properties.customerId
+output dceIngestionUri string = deployLogAnalytics ? dce.properties.logsIngestion.endpoint : ''
+output dcrImmutableId string = deployLogAnalytics ? dcr.properties.immutableId : ''
+output streamName string = deployLogAnalytics ? 'Custom-${tableName}_CL' : ''
+output lawWorkspaceId string = deployLogAnalytics ? law.properties.customerId : ''
 output auditStorageName string = auditStorage.name
 output postDeployMessage string = 'After deployment: 1) Grant ActivityFeed.Read to the Function App identity (${funcApp.identity.principalId}) via PowerShell. 2) Start the Audit.General subscription. 3) Deploy the function code. 4) Clear profile.ps1. See README.md for details.'
