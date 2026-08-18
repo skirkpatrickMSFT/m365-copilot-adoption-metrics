@@ -90,11 +90,17 @@ function Read-DayEvents {
                 $evts = if ($raw -is [array]) { $raw } else { @($raw) }
                 foreach ($e in $evts) {
                     if (-not $e.UserId) { continue }
+                    # Agent file URL surfaces in AccessedResources when Type=="agent"
+                    $agentResource = $e.CopilotEventData.AccessedResources | Where-Object { $_.Type -eq 'agent' } | Select-Object -First 1
                     $events.Add([pscustomobject]@{
-                        UserId  = [string]$e.UserId
-                        AppHost = if ($e.CopilotEventData.AppHost) { [string]$e.CopilotEventData.AppHost }
-                                  elseif ($e.AppHost)              { [string]$e.AppHost }
-                                  else                             { 'Copilot Chat' }
+                        UserId      = [string]$e.UserId
+                        AppHost     = if ($e.CopilotEventData.AppHost) { [string]$e.CopilotEventData.AppHost }
+                                      elseif ($e.AppHost)              { [string]$e.AppHost }
+                                      else                             { 'Copilot Chat' }
+                        AgentName   = if ($e.CopilotEventData.TargetAgentName) { [string]$e.CopilotEventData.TargetAgentName }
+                                      elseif ($e.AgentName)                    { [string]$e.AgentName }
+                                      else                                      { $null }
+                        AgentSiteUrl = if ($agentResource) { [string]$agentResource.SiteUrl } else { $null }
                     })
                 }
             } catch { Write-Warning "Skipping ${name}: $($_.Exception.Message)" }
