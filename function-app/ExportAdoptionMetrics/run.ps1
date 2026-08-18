@@ -157,15 +157,14 @@ Invoke-RestMethod -Uri $firstSeenUri -Method PUT -Headers $saveHdr -Body ($first
 Invoke-RestMethod -Uri $aggregatesUri -Method PUT -Headers $saveHdr -Body ($dailyAggregates | ConvertTo-Json -Compress -Depth 5) | Out-Null
 
 # ── Write to SharePoint ───────────────────────────────────────────────────────
-# Fetch all existing items from a list once, delete those whose Title is in the
-# provided set (in-memory filter avoids unreliable OData filter on the server).
-function Clear-SpTitles {
-    param([string]$ListUrl, [string]$Token, [System.Collections.Generic.HashSet[string]]$Titles)
+# Delete ALL items from a list before rewriting — simpler and duplicate-proof.
+function Clear-SpList {
+    param([string]$ListUrl, [string]$Token)
     $readHdr  = @{ 'Authorization' = "Bearer $Token"; 'Accept' = 'application/json;odata=nometadata' }
     $writeHdr = @{ 'Authorization' = "Bearer $Token"; 'Accept' = 'application/json;odata=nometadata'; 'Content-Type' = 'application/json;odata=nometadata' }
-    $all = try { (Invoke-RestMethod -Uri "${ListUrl}?`$select=Id,Title&`$top=5000" -Headers $readHdr).value } catch { @() }
+    $all = try { (Invoke-RestMethod -Uri "${ListUrl}?`$select=Id&`$top=5000" -Headers $readHdr).value } catch { @() }
     foreach ($item in @($all)) {
-        if (-not $item -or -not $item.Id -or -not $Titles.Contains($item.Title)) { continue }
+        if (-not $item -or -not $item.Id) { continue }
         $delHdr = $writeHdr.Clone(); $delHdr['IF-MATCH'] = '*'; $delHdr['X-HTTP-Method'] = 'DELETE'
         Invoke-WebRequest -Uri "${ListUrl}($($item.Id))" -Method POST -Headers $delHdr -UseBasicParsing | Out-Null
     }
@@ -184,36 +183,16 @@ $appApiBase       = "$spSiteUrl/_api/web/lists/getbytitle('$spAppList')/items"
 $weeklyApiBase    = "$spSiteUrl/_api/web/lists/getbytitle('$spWeeklyList')/items"
 $weeklyAppApiBase = "$spSiteUrl/_api/web/lists/getbytitle('$spWeeklyAppList')/items"
 
-# Build title sets from ALL historical aggregates (not just datesToProcess) so
-# SharePoint always receives a complete snapshot even if lists were manually cleared.
-$allAggDates    = @($dailyAggregates.Keys | Sort-Object)
-$dailyTitles    = [System.Collections.Generic.HashSet[string]]::new()
-$appTitles      = [System.Collections.Generic.HashSet[string]]::new()
-$weeklyTitles   = [System.Collections.Generic.HashSet[string]]::new()
-$weeklyAppTitles= [System.Collections.Generic.HashSet[string]]::new()
-
-foreach ($dateStr in $allAggDates) {
-    $agg = $dailyAggregates[$dateStr]; if (-not $agg) { continue }
-    $dailyTitles.Add($dateStr) | Out-Null
-    foreach ($app in $agg.appCounts.PSObject.Properties) { $appTitles.Add("$dateStr|$($app.Name)") | Out-Null }
-}
-$allWeeks = $allAggDates | ForEach-Object { (Get-WeekStart ([datetime]$_)).ToString('yyyy-MM-dd') } | Select-Object -Unique
+$allAggDates   = @($dailyAggregates.Keys | Sort-Object)
+$allWeeks      = $allAggDates | ForEach-Object { (Get-WeekStart ([datetime]$_)).ToString('yyyy-MM-dd') } | Select-Object -Unique
 $affectedWeeks = $datesToProcess | ForEach-Object { (Get-WeekStart ([datetime]$_)).ToString('yyyy-MM-dd') } | Select-Object -Unique
-foreach ($ws in $allWeeks) {
-    $weeklyTitles.Add($ws) | Out-Null
-    $wsDays = 0..6 | ForEach-Object { ([datetime]$ws).AddDays($_).ToString('yyyy-MM-dd') }
-    foreach ($wd in $wsDays) {
-        $agg = $dailyAggregates[$wd]; if (-not $agg) { continue }
-        foreach ($app in $agg.appCounts.PSObject.Properties) { $weeklyAppTitles.Add("$ws|$($app.Name)") | Out-Null }
-    }
-}
 
-# One bulk read + delete per list, then write complete snapshot
-Write-Host "Clearing stale SharePoint rows..."
-Clear-SpTitles -ListUrl $dailyApiBase     -Token $spToken -Titles $dailyTitles
-Clear-SpTitles -ListUrl $appApiBase       -Token $spToken -Titles $appTitles
-Clear-SpTitles -ListUrl $weeklyApiBase    -Token $spToken -Titles $weeklyTitles
-Clear-SpTitles -ListUrl $weeklyAppApiBase -Token $spToken -Titles $weeklyAppTitles
+# Clear entire lists before rewriting — guarantees no duplicates regardless of run count
+Write-Host "Clearing SharePoint lists..."
+Clear-SpList -ListUrl $dailyApiBase     -Token $spToken
+Clear-SpList -ListUrl $appApiBase       -Token $spToken
+Clear-SpList -ListUrl $weeklyApiBase    -Token $spToken
+Clear-SpList -ListUrl $weeklyAppApiBase -Token $spToken
 
 Write-Host "Writing daily and app rows..."
 foreach ($dateStr in $allAggDates) {
