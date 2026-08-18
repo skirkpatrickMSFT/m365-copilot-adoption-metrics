@@ -225,7 +225,9 @@ Trigger the initial export manually. Portal → **ExportAdoptionMetrics** → **
 
 For a historical backfill, first temporarily set `METRICS_LOOKBACK_DAYS` to cover your full data range (e.g. `90`), run once, then reset to `7`.
 
-### 10. Build the Canvas Power App
+### 10. Build the Canvas Power App (optional)
+
+> The SharePoint lists work fully without the Power App — you can share list views directly or embed them as SharePoint list web parts. Build the Power App at any time later.
 
 1. Go to https://make.powerapps.com → **+ Create → Start with data → SharePoint**
 2. Connect to your SharePoint site, pick `CopilotDailyMetrics`
