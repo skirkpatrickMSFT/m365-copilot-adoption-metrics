@@ -77,8 +77,9 @@ if ($datesToProcess.Count -eq 0) { Write-Host 'Nothing to do.'; return }
 function Read-DayEvents {
     param([string]$DateStr)
     $events = [System.Collections.Generic.List[pscustomobject]]::new()
-    $enc    = [System.Uri]::EscapeDataString(([datetime]$DateStr).ToString('yyyy/MM/dd'))
-    $uri    = "${baseUrl}?restype=container&comp=list&prefix=${enc}&maxresults=1000"
+    $enc      = [System.Uri]::EscapeDataString(([datetime]$DateStr).ToString('yyyy/MM/dd'))
+    $listBase = $baseUrl + '?restype=container' + '&comp=list' + '&prefix=' + $enc + '&maxresults=1000'
+    $uri      = $listBase
     while ($uri) {
         $xml   = [xml](Invoke-WebRequest -Uri $uri -Headers $storageHdr -UseBasicParsing).Content.TrimStart([char]0xFEFF)
         $nodes = $xml.EnumerationResults.Blobs.Blob
@@ -99,7 +100,7 @@ function Read-DayEvents {
             } catch { Write-Warning "Skipping ${name}: $($_.Exception.Message)" }
         }
         $marker = $xml.EnumerationResults.NextMarker
-        $uri    = if ($marker) { "${baseUrl}?restype=container&comp=list&prefix=${enc}&maxresults=1000&marker=$([System.Uri]::EscapeDataString($marker))" } else { $null }
+        $uri    = if ($marker) { $listBase + '&marker=' + [System.Uri]::EscapeDataString($marker) } else { $null }
     }
     return ,$events
 }
