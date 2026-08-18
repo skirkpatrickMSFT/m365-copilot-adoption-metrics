@@ -382,6 +382,7 @@ resource funcApp 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'SHAREPOINT_APP_LIST', value: 'CopilotAppMetrics' }
         { name: 'SHAREPOINT_WEEKLY_LIST', value: 'CopilotWeeklyMetrics' }
         { name: 'SHAREPOINT_WEEKLY_APP_LIST', value: 'CopilotWeeklyAppMetrics' }
+        { name: 'SHAREPOINT_AGENT_LIST', value: 'CopilotAgentRegistry' }
         { name: 'METRICS_LOOKBACK_DAYS', value: string(metricsLookbackDays) }
         { name: 'METRICS_EXPORT_SCHEDULE', value: '0 0 */4 * * *' }
       ]

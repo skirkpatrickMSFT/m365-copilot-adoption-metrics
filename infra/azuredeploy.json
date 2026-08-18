@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.46.1.21595",
-      "templateHash": "10145207741276436361"
+      "templateHash": "7120726856230769665"
     }
   },
   "parameters": {
@@ -656,6 +656,10 @@
             {
               "name": "SHAREPOINT_WEEKLY_APP_LIST",
               "value": "CopilotWeeklyAppMetrics"
+            },
+            {
+              "name": "SHAREPOINT_AGENT_LIST",
+              "value": "CopilotAgentRegistry"
             },
             {
               "name": "METRICS_LOOKBACK_DAYS",
