@@ -162,11 +162,15 @@ function Clear-SpList {
     param([string]$ListUrl, [string]$Token)
     $readHdr  = @{ 'Authorization' = "Bearer $Token"; 'Accept' = 'application/json;odata=nometadata' }
     $writeHdr = @{ 'Authorization' = "Bearer $Token"; 'Accept' = 'application/json;odata=nometadata'; 'Content-Type' = 'application/json;odata=nometadata' }
-    $all = try { (Invoke-RestMethod -Uri "${ListUrl}?`$select=Id&`$top=5000" -Headers $readHdr).value } catch { @() }
-    foreach ($item in @($all)) {
+    $listResult = try { Invoke-RestMethod -Uri "${ListUrl}?`$select=Id&`$top=5000" -Headers $readHdr } catch { $null }
+    $all = if ($listResult -and $listResult.value) { @($listResult.value) } elseif ($listResult) { @($listResult) } else { @() }
+    Write-Host "  Clearing $($all.Count) item(s) from list..."
+    foreach ($item in $all) {
         if (-not $item -or -not $item.Id) { continue }
         $delHdr = $writeHdr.Clone(); $delHdr['IF-MATCH'] = '*'; $delHdr['X-HTTP-Method'] = 'DELETE'
-        Invoke-WebRequest -Uri "${ListUrl}($($item.Id))" -Method POST -Headers $delHdr -UseBasicParsing | Out-Null
+        try {
+            Invoke-WebRequest -Uri "${ListUrl}($($item.Id))" -Method POST -Headers $delHdr -UseBasicParsing | Out-Null
+        } catch { Write-Warning "  Failed to delete item $($item.Id): $($_.Exception.Message)" }
     }
 }
 
