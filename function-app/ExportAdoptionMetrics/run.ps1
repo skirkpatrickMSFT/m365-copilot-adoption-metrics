@@ -37,6 +37,23 @@ $spToken      = Get-ManagedToken -Resource "$($spUri.Scheme)://$($spUri.Host)"
 
 $baseUrl    = "https://$storageAccount.$storageSuffix/$container"
 $storageHdr = @{ 'Authorization' = "Bearer $storageToken"; 'x-ms-version' = '2021-08-06' }
+
+# ── Acquire a 60-second blob lease as a distributed lock ─────────────────────
+# A second run that starts while this one is in progress will fail to acquire
+# the lease and exit cleanly, preventing duplicate SharePoint writes.
+$lockUri = "${baseUrl}/_state/export.lock"
+try { Invoke-RestMethod -Uri $lockUri -Method PUT -Headers (@{ 'Authorization' = "Bearer $storageToken"; 'x-ms-version' = '2021-08-06'; 'x-ms-blob-type' = 'BlockBlob'; 'Content-Length' = '0' }) -Body '' | Out-Null } catch {}
+$leaseId = $null
+try {
+    $acqHdr = @{ 'Authorization' = "Bearer $storageToken"; 'x-ms-version' = '2021-08-06'; 'x-ms-lease-action' = 'acquire'; 'x-ms-lease-duration' = '60' }
+    $leaseResp = Invoke-WebRequest -Uri "${lockUri}?comp=lease" -Method PUT -Headers $acqHdr -UseBasicParsing
+    $leaseId = $leaseResp.Headers['x-ms-lease-id']
+    Write-Host "Acquired export lock: $leaseId"
+} catch {
+    Write-Warning 'Another export run already holds the lock. Exiting to avoid duplicate writes.'
+    return
+}
+try {
 $today      = (Get-Date).ToUniversalTime().Date
 $yesterday  = $today.AddDays(-1)
 $todayStr   = $today.ToString('yyyy-MM-dd')
@@ -287,3 +304,13 @@ foreach ($dateStr in $datesToProcess) {
 Invoke-RestMethod -Uri $exportStateUri -Method PUT -Headers $saveHdr -Body ($exportedDates.Keys | ConvertTo-Json -Compress) | Out-Null
 
 Write-Host "Export complete. Processed: $($datesToProcess.Count) date(s). Total in history: $($exportedDates.Count)."
+
+} finally {
+    if ($leaseId) {
+        try {
+            $relHdr = @{ 'Authorization' = "Bearer $storageToken"; 'x-ms-version' = '2021-08-06'; 'x-ms-lease-action' = 'release'; 'x-ms-lease-id' = $leaseId }
+            Invoke-WebRequest -Uri "${lockUri}?comp=lease" -Method PUT -Headers $relHdr -UseBasicParsing | Out-Null
+            Write-Host "Released export lock."
+        } catch { Write-Warning "Failed to release lock: $($_.Exception.Message)" }
+    }
+}
