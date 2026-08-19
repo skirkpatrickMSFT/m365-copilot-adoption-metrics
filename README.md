@@ -243,13 +243,56 @@ For a historical backfill, first temporarily set `METRICS_LOOKBACK_DAYS` to cove
 
 > The SharePoint lists work fully without the Power App — you can share list views directly or embed them as SharePoint list web parts. Build the Power App at any time later.
 
-1. Go to https://make.powerapps.com → **+ Create → Start with data → SharePoint**
-2. Connect to your SharePoint site, pick `CopilotDailyMetrics`
-3. Add all four lists as data sources (**Data** pane → Add data)
-4. Build screens using the M queries and DAX measures in the `powerbi/` folder as reference
-5. **File → Save → Publish**
+#### 10.1 Create and connect the app
 
-**Embed in SharePoint:** Edit page → **+** → search **Power Apps** web part → select your app → Republish.
+1. Go to https://make.powerapps.com → **+ Create → Start with data → SharePoint**
+2. Connect to your SharePoint site, pick `CopilotDailyMetrics` as the starting table
+3. Delete the auto-generated screens — start from a blank screen
+4. **Data** pane → **Add data** → SharePoint → same site → add all five lists:
+   - `CopilotDailyMetrics`
+   - `CopilotAppMetrics`
+   - `CopilotWeeklyMetrics`
+   - `CopilotWeeklyAppMetrics`
+   - `SharePointCopilotAgentRegistry`
+
+#### 10.2 Build Screen 1 — Daily Overview
+
+- Insert → **Line chart** for DAU over time:
+  - `Items`: `Sort(CopilotDailyMetrics, MetricDate, Ascending)`
+  - `Series`: `"DAU"` · `XLabelColumn`: `"MetricDate"`
+- Insert a second **Line chart** for TotalInteractions (same Items, `Series`: `"TotalInteractions"`)
+- Insert a third **Line chart** for NewUsers
+- Optional date filter — Insert → **Dropdown**:
+  - `Items`: `["Last 7 days","Last 30 days","Last 90 days","All time"]`
+  - Wrap each chart's Items: `Filter(Sort(CopilotDailyMetrics, MetricDate, Ascending), MetricDate >= DateAdd(Today(), If(Dropdown1.Selected.Value="Last 7 days",-7,If(Dropdown1.Selected.Value="Last 30 days",-30,-90)), Days))`
+
+#### 10.3 Build Screen 2 — App Breakdown
+
+- Insert → **Bar chart**:
+  - `Items`: `AddColumns(GroupBy(CopilotAppMetrics,"AppHost","rows"),"TotalInteractions",Sum(rows,Interactions),"TotalUsers",Sum(rows,Users))`
+  - `Series`: `"TotalInteractions"` · `Labels`: `"AppHost"`
+- Insert a **Pie chart** for share by app (same Items, `Series`: `"TotalInteractions"`)
+
+#### 10.4 Build Screen 3 — Weekly Summary
+
+- Insert → **Gallery** (vertical):
+  - `Items`: `Sort(CopilotWeeklyMetrics, WeekStart, Descending)`
+  - Labels: WeekStart, WeekEnd, TotalInteractions, UniqueUsers, NewUsers, AppsUsed
+- Insert → **Bar chart** for weekly app breakdown:
+  - `Items`: `Filter(CopilotWeeklyAppMetrics, WeekStart = Gallery1.Selected.WeekStart)`
+  - `Series`: `"Interactions"` · `Labels`: `"AppHost"`
+
+#### 10.5 Build Screen 4 — Agent Registry
+
+- Insert → **Gallery** (vertical):
+  - `Items`: `Sort(SharePointCopilotAgentRegistry, CreatedDate, Descending)`
+  - Labels: AgentName, SiteUrl, CreatedBy, CreatedDate
+- This screen shows all Copilot agents created in SharePoint in chronological order
+
+#### 10.6 Publish and embed
+
+1. **File → Save → Publish**
+2. SharePoint site → **Edit page** → **+** → search **Power Apps** web part → select your app → resize → **Republish**
 
 ### 11. Import the Azure Monitor Workbook (Log Analytics only, optional)
 
