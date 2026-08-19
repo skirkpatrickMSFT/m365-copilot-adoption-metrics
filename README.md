@@ -1,6 +1,6 @@
 # Copilot Adoption Dashboard
 
-Automated collection and visualization of Microsoft 365 Copilot usage metrics from the Unified Audit Log.
+Automated collection and visualization of Microsoft 365 Copilot usage metrics from the Unified Audit Log. The visualizations are built in SharePoint.
 
 Two deployment paths are available:
 
