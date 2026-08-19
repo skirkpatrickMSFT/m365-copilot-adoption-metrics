@@ -167,7 +167,10 @@ function Clear-SpList {
     $round = 0
     do {
         $round++
-        $listResult = try { Invoke-RestMethod -Uri "${ListUrl}?`$select=Id&`$top=100" -Headers $readHdr } catch { $null }
+        $listResult = try { Invoke-RestMethod -Uri "${ListUrl}?`$select=Id&`$top=100" -Headers $readHdr } catch {
+            Write-Warning "  List fetch error: $($_.Exception.Message) | $($_.ErrorDetails.Message)"
+            $null
+        }
         $items = if ($listResult -and $listResult.value) { @($listResult.value) } else { @() }
         if ($items.Count -eq 0) { break }
         $deletedThisRound = 0
