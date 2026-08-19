@@ -60,13 +60,20 @@ $todayStr   = $today.ToString('yyyy-MM-dd')
 $yestStr    = $yesterday.ToString('yyyy-MM-dd')
 
 # ── Load state ───────────────────────────────────────────────────────────────
-$exportStateUri = "${baseUrl}/_state/exportedDates.json"
-$aggregatesUri  = "${baseUrl}/_state/dailyAggregates.json"
-$firstSeenUri   = "${baseUrl}/_state/firstSeen.json"
+# blobTracker + liveUserSets only ever hold entries for "open" dates (today,
+# yesterday, or in-progress backfill). Once a date is finalized (exportedDates),
+# its entries are pruned so these stay small regardless of total history.
+$exportStateUri  = "${baseUrl}/_state/exportedDates.json"
+$aggregatesUri   = "${baseUrl}/_state/dailyAggregates.json"
+$firstSeenUri    = "${baseUrl}/_state/firstSeen.json"
+$blobTrackerUri  = "${baseUrl}/_state/blobTracker.json"
+$liveSetsUri     = "${baseUrl}/_state/liveUserSets.json"
 
 $exportedDates   = @{}
 $dailyAggregates = @{}
 $firstSeenMap    = @{}
+$blobTracker     = @{}   # date -> HashSet[string] of already-processed blob names
+$liveUserSets    = @{}   # date -> @{ users = HashSet[string]; appUsers = @{ app -> HashSet[string] } }
 
 try { $d = Invoke-RestMethod -Uri $exportStateUri -Headers $storageHdr; foreach ($item in @($d)) { $exportedDates[$item] = $true } }
 catch { Write-Host 'No export state; will process all dates in lookback window.' }
@@ -76,6 +83,26 @@ catch { Write-Host 'No daily aggregates cache.' }
 
 try { $fs = Invoke-RestMethod -Uri $firstSeenUri -Headers $storageHdr; foreach ($prop in $fs.PSObject.Properties) { $firstSeenMap[$prop.Name] = $prop.Value } }
 catch { Write-Host 'No firstSeen cache.' }
+
+try {
+    $bt = Invoke-RestMethod -Uri $blobTrackerUri -Headers $storageHdr
+    foreach ($prop in $bt.PSObject.Properties) { $blobTracker[$prop.Name] = [System.Collections.Generic.HashSet[string]]::new([string[]]$prop.Value) }
+} catch { Write-Host 'No blob tracker cache; will treat all blobs as new.' }
+
+try {
+    $ls = Invoke-RestMethod -Uri $liveSetsUri -Headers $storageHdr
+    foreach ($prop in $ls.PSObject.Properties) {
+        $entry = $prop.Value
+        $appUsersDict = @{}
+        if ($entry.appUsers) {
+            foreach ($ap in $entry.appUsers.PSObject.Properties) { $appUsersDict[$ap.Name] = [System.Collections.Generic.HashSet[string]]::new([string[]]$ap.Value) }
+        }
+        $liveUserSets[$prop.Name] = @{
+            users    = [System.Collections.Generic.HashSet[string]]::new([string[]]$entry.users)
+            appUsers = $appUsersDict
+        }
+    }
+} catch { Write-Host 'No live user-set cache; DAU will be rebuilt from new blobs only.' }
 
 # ── Determine which dates to process ────────────────────────────────────────
 # Always: today (incomplete) and yesterday (late-arriving events).
@@ -90,42 +117,38 @@ for ($d = $today.AddDays(-$lookbackDays); $d -le $today; $d = $d.AddDays(1)) {
 Write-Host "Dates to process: $($datesToProcess.Count) — $($datesToProcess -join ', ')"
 if ($datesToProcess.Count -eq 0) { Write-Host 'Nothing to do.'; return }
 
-# ── Helper: read all events from blob storage for a single date ──────────────
-function Read-DayEvents {
+# ── Helper: parse a single event's fields (shared shape used everywhere) ─────
+function ConvertTo-EventRecord {
+    param($e)
+    if (-not $e.UserId) { return $null }
+    $agentResource = $e.CopilotEventData.AccessedResources | Where-Object { $_.Type -eq 'agent' } | Select-Object -First 1
+    [pscustomobject]@{
+        UserId       = [string]$e.UserId
+        AppHost      = if ($e.CopilotEventData.AppHost) { [string]$e.CopilotEventData.AppHost }
+                       elseif ($e.AppHost)              { [string]$e.AppHost }
+                       else                              { 'Copilot Chat' }
+        AgentName    = if ($e.CopilotEventData.TargetAgentName) { [string]$e.CopilotEventData.TargetAgentName }
+                       elseif ($e.AgentName)                    { [string]$e.AgentName }
+                       else                                      { $null }
+        AgentSiteUrl = if ($agentResource) { [string]$agentResource.SiteUrl } else { $null }
+    }
+}
+
+# ── List blob names for a date (cheap — no content download) ─────────────────
+function Get-DayBlobNames {
     param([string]$DateStr)
-    $events = [System.Collections.Generic.List[pscustomobject]]::new()
+    $names    = [System.Collections.Generic.List[string]]::new()
     $enc      = [System.Uri]::EscapeDataString(([datetime]$DateStr).ToString('yyyy/MM/dd'))
     $listBase = $baseUrl + '?restype=container' + '&comp=list' + '&prefix=' + $enc + '&maxresults=1000'
     $uri      = $listBase
     while ($uri) {
         $xml   = [xml](Invoke-WebRequest -Uri $uri -Headers $storageHdr -UseBasicParsing).Content.TrimStart([char]0xFEFF)
         $nodes = $xml.EnumerationResults.Blobs.Blob
-        $names = if ($nodes) { @($nodes | Where-Object { $_.Name -and $_.Name.EndsWith('.json') } | Select-Object -ExpandProperty Name) } else { @() }
-        foreach ($name in $names) {
-            try {
-                $raw  = Invoke-RestMethod -Uri "${baseUrl}/${name}" -Headers $storageHdr
-                $evts = if ($raw -is [array]) { $raw } else { @($raw) }
-                foreach ($e in $evts) {
-                    if (-not $e.UserId) { continue }
-                    # Agent file URL surfaces in AccessedResources when Type=="agent"
-                    $agentResource = $e.CopilotEventData.AccessedResources | Where-Object { $_.Type -eq 'agent' } | Select-Object -First 1
-                    $events.Add([pscustomobject]@{
-                        UserId      = [string]$e.UserId
-                        AppHost     = if ($e.CopilotEventData.AppHost) { [string]$e.CopilotEventData.AppHost }
-                                      elseif ($e.AppHost)              { [string]$e.AppHost }
-                                      else                             { 'Copilot Chat' }
-                        AgentName   = if ($e.CopilotEventData.TargetAgentName) { [string]$e.CopilotEventData.TargetAgentName }
-                                      elseif ($e.AgentName)                    { [string]$e.AgentName }
-                                      else                                      { $null }
-                        AgentSiteUrl = if ($agentResource) { [string]$agentResource.SiteUrl } else { $null }
-                    })
-                }
-            } catch { Write-Warning "Skipping ${name}: $($_.Exception.Message)" }
-        }
+        if ($nodes) { foreach ($n in @($nodes | Where-Object { $_.Name -and $_.Name.EndsWith('.json') } | Select-Object -ExpandProperty Name)) { $names.Add($n) } }
         $marker = $xml.EnumerationResults.NextMarker
         $uri    = if ($marker) { $listBase + '&marker=' + [System.Uri]::EscapeDataString($marker) } else { $null }
     }
-    return ,$events
+    return ,$names
 }
 
 function Get-WeekStart {
@@ -134,44 +157,85 @@ function Get-WeekStart {
     $Date.AddDays(1 - $dow).Date
 }
 
-# ── Process each date: compute aggregates, update firstSeen, save state ──────
+# ── Process each date: only download/parse blobs not already counted ─────────
 foreach ($dateStr in $datesToProcess) {
     Write-Host "Processing $dateStr ..."
-    $events = Read-DayEvents -DateStr $dateStr
+    $allBlobNames = Get-DayBlobNames -DateStr $dateStr
+    if (-not $blobTracker.ContainsKey($dateStr)) { $blobTracker[$dateStr] = [System.Collections.Generic.HashSet[string]]::new() }
+    $seenBlobs = $blobTracker[$dateStr]
+    $newBlobNames = @($allBlobNames | Where-Object { -not $seenBlobs.Contains($_) })
 
-    if ($events.Count -eq 0) {
-        Write-Host "  No events."
+    Write-Host "  $($allBlobNames.Count) blob(s) total, $($newBlobNames.Count) new since last run."
+    if ($newBlobNames.Count -eq 0) {
+        Write-Host "  Nothing new."
         continue
     }
 
-    foreach ($e in $events) {
-        if (-not $firstSeenMap.ContainsKey($e.UserId)) { $firstSeenMap[$e.UserId] = $dateStr }
+    if (-not $liveUserSets.ContainsKey($dateStr)) {
+        $liveUserSets[$dateStr] = @{ users = [System.Collections.Generic.HashSet[string]]::new(); appUsers = @{} }
+    }
+    $userSet    = $liveUserSets[$dateStr].users
+    $appUserSets = $liveUserSets[$dateStr].appUsers
+
+    $existingAgg   = $dailyAggregates[$dateStr]
+    $interactions  = if ($existingAgg) { [int]$existingAgg.interactions } else { 0 }
+    $appCounts     = @{}
+    if ($existingAgg -and $existingAgg.appCounts) {
+        foreach ($p in $existingAgg.appCounts.PSObject.Properties) { $appCounts[$p.Name] = [int]$p.Value }
     }
 
-    $appCounts = @{}; $appUsers = @{}
-    foreach ($e in $events) {
-        if (-not $appCounts.ContainsKey($e.AppHost)) { $appCounts[$e.AppHost] = 0; $appUsers[$e.AppHost] = [System.Collections.Generic.HashSet[string]]::new() }
-        $appCounts[$e.AppHost]++
-        $appUsers[$e.AppHost].Add($e.UserId) | Out-Null
+    $newEventCount = 0
+    foreach ($name in $newBlobNames) {
+        try {
+            $raw  = Invoke-RestMethod -Uri "${baseUrl}/${name}" -Headers $storageHdr
+            $evts = if ($raw -is [array]) { $raw } else { @($raw) }
+            foreach ($rawEvt in $evts) {
+                $e = ConvertTo-EventRecord -e $rawEvt
+                if (-not $e) { continue }
+                $newEventCount++
+                $interactions++
+                if (-not $appCounts.ContainsKey($e.AppHost)) { $appCounts[$e.AppHost] = 0 }
+                $appCounts[$e.AppHost]++
+                $userSet.Add($e.UserId) | Out-Null
+                if (-not $appUserSets.ContainsKey($e.AppHost)) { $appUserSets[$e.AppHost] = [System.Collections.Generic.HashSet[string]]::new() }
+                $appUserSets[$e.AppHost].Add($e.UserId) | Out-Null
+                if (-not $firstSeenMap.ContainsKey($e.UserId)) { $firstSeenMap[$e.UserId] = $dateStr }
+            }
+        } catch { Write-Warning "  Skipping ${name}: $($_.Exception.Message)" }
+        $seenBlobs.Add($name) | Out-Null
     }
+    Write-Host "  Parsed $newEventCount new event(s)."
 
     $appUserCounts = @{}
-    foreach ($app in $appUsers.Keys) { $appUserCounts[$app] = $appUsers[$app].Count }
+    foreach ($app in $appUserSets.Keys) { $appUserCounts[$app] = $appUserSets[$app].Count }
 
     $dailyAggregates[$dateStr] = [pscustomobject]@{
-        dau          = ($events.UserId | Select-Object -Unique).Count
-        interactions = $events.Count
+        dau          = $userSet.Count
+        interactions = $interactions
         newUsers     = @($firstSeenMap.GetEnumerator() | Where-Object { $_.Value -eq $dateStr }).Count
         appCounts    = [pscustomobject]$appCounts
         appUsers     = [pscustomobject]$appUserCounts
     }
-
 }
 
 # ── Persist computed data (not yet marking dates as done) ────────────────────
 $saveHdr = @{ 'Authorization' = "Bearer $storageToken"; 'x-ms-version' = '2021-08-06'; 'x-ms-blob-type' = 'BlockBlob'; 'Content-Type' = 'application/json' }
 Invoke-RestMethod -Uri $firstSeenUri -Method PUT -Headers $saveHdr -Body ($firstSeenMap   | ConvertTo-Json -Compress -Depth 2) | Out-Null
 Invoke-RestMethod -Uri $aggregatesUri -Method PUT -Headers $saveHdr -Body ($dailyAggregates | ConvertTo-Json -Compress -Depth 5) | Out-Null
+
+# Serialize blobTracker (HashSet -> array) — only open dates are ever present here
+$blobTrackerOut = @{}
+foreach ($k in $blobTracker.Keys) { $blobTrackerOut[$k] = @($blobTracker[$k]) }
+Invoke-RestMethod -Uri $blobTrackerUri -Method PUT -Headers $saveHdr -Body ($blobTrackerOut | ConvertTo-Json -Compress -Depth 3) | Out-Null
+
+# Serialize liveUserSets (HashSet -> array), same open-dates-only scope
+$liveSetsOut = @{}
+foreach ($k in $liveUserSets.Keys) {
+    $appUsersOut = @{}
+    foreach ($ap in $liveUserSets[$k].appUsers.Keys) { $appUsersOut[$ap] = @($liveUserSets[$k].appUsers[$ap]) }
+    $liveSetsOut[$k] = @{ users = @($liveUserSets[$k].users); appUsers = $appUsersOut }
+}
+Invoke-RestMethod -Uri $liveSetsUri -Method PUT -Headers $saveHdr -Body ($liveSetsOut | ConvertTo-Json -Compress -Depth 4) | Out-Null
 
 # ── Write to SharePoint ───────────────────────────────────────────────────────
 # Delete items from a list whose Title exactly matches any value in the provided set.
@@ -315,6 +379,26 @@ foreach ($dateStr in $datesToProcess) {
     if ($dateStr -ne $todayStr -and $dateStr -ne $yestStr) { $exportedDates[$dateStr] = $true }
 }
 Invoke-RestMethod -Uri $exportStateUri -Method PUT -Headers $saveHdr -Body ($exportedDates.Keys | ConvertTo-Json -Compress) | Out-Null
+
+# Prune blobTracker/liveUserSets for dates that are now finalized — their final
+# counts are permanently kept in dailyAggregates, so the per-blob/per-user
+# tracking is no longer needed and would otherwise grow with total history.
+$closedDates = @($blobTracker.Keys) | Where-Object { $exportedDates.ContainsKey($_) }
+foreach ($cd in $closedDates) { $blobTracker.Remove($cd); $liveUserSets.Remove($cd) }
+if ($closedDates.Count -gt 0) {
+    $blobTrackerOut2 = @{}
+    foreach ($k in $blobTracker.Keys) { $blobTrackerOut2[$k] = @($blobTracker[$k]) }
+    Invoke-RestMethod -Uri $blobTrackerUri -Method PUT -Headers $saveHdr -Body ($blobTrackerOut2 | ConvertTo-Json -Compress -Depth 3) | Out-Null
+
+    $liveSetsOut2 = @{}
+    foreach ($k in $liveUserSets.Keys) {
+        $appUsersOut2 = @{}
+        foreach ($ap in $liveUserSets[$k].appUsers.Keys) { $appUsersOut2[$ap] = @($liveUserSets[$k].appUsers[$ap]) }
+        $liveSetsOut2[$k] = @{ users = @($liveUserSets[$k].users); appUsers = $appUsersOut2 }
+    }
+    Invoke-RestMethod -Uri $liveSetsUri -Method PUT -Headers $saveHdr -Body ($liveSetsOut2 | ConvertTo-Json -Compress -Depth 4) | Out-Null
+    Write-Host "Pruned tracking state for $($closedDates.Count) finalized date(s): $($closedDates -join ', ')"
+}
 
 Write-Host "Export complete. Processed: $($datesToProcess.Count) date(s). Total in history: $($exportedDates.Count)."
 
