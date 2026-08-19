@@ -188,32 +188,32 @@ function Clear-SpList {
             Write-Warning "  List fetch error: $($_.Exception.Message)"
             $null
         }
-        $listResult = if ($rawResp) { try { $rawResp.Content | ConvertFrom-Json } catch { $null } } else { $null }
+        $listResult = if ($rawResp) { try { $rawResp.Content | ConvertFrom-Json -AsHashtable } catch { $null } } else { $null }
         # Debug: log response on first round only
         if ($round -eq 1) {
             $ct = if ($rawResp) { $rawResp.Headers.'Content-Type' } else { 'no response' }
             $pt = if ($listResult -ne $null) { $listResult.GetType().Name } else { 'null' }
-            $vc = if ($listResult -and $listResult.value -ne $null) { @($listResult.value).Count } else { 'null' }
-            $raw173 = if ($rawResp -and $rawResp.Content.Length -lt 500) { $rawResp.Content } else { '(too long)' }
-            Write-Host "  ContentType: $ct | ParsedType: $pt | value count: $vc | raw: $raw173"
+            $vc = if ($listResult -and $listResult.ContainsKey('value')) { @($listResult['value']).Count } else { 'null' }
+            Write-Host "  ContentType: $ct | ParsedType: $pt | value count: $vc"
         }
-        # Support both odata=nometadata (.value) and odata=verbose (.d.results) response formats
-        $items = if ($listResult -and $listResult.value) { @($listResult.value) }
-                 elseif ($listResult -and $listResult.d -and $listResult.d.results) { @($listResult.d.results) }
-                 else { @() }
+        $rawItems = if ($listResult -and $listResult.ContainsKey('value')) { @($listResult['value']) }
+                    elseif ($listResult -and $listResult.ContainsKey('d')) { @($listResult['d']['results']) }
+                    else { @() }
+        $items = $rawItems | Where-Object { $_ -and ($_['Id'] -or $_.Id) }
         if ($items.Count -eq 0) { break }
         $deletedThisRound = 0
         foreach ($item in $items) {
-            if (-not $item -or -not $item.Id) { continue }
+            $itemId = if ($item -is [hashtable]) { $item['Id'] } else { $item.Id }
+            if (-not $itemId) { continue }
             $delHdr = $writeHdr.Clone(); $delHdr['IF-MATCH'] = '*'; $delHdr['X-HTTP-Method'] = 'DELETE'
             try {
-                $resp = Invoke-WebRequest -Uri "${ListUrl}($($item.Id))" -Method POST -Headers $delHdr -UseBasicParsing
+                Invoke-WebRequest -Uri "${ListUrl}($itemId)" -Method POST -Headers $delHdr -UseBasicParsing | Out-Null
                 $totalDeleted++; $deletedThisRound++
             } catch {
                 $code = $_.Exception.Response.StatusCode.value__
                 if ($code -eq 429 -or $code -eq 503) {
-                    Start-Sleep -Seconds 10  # back off on throttle and retry next round
-                } else { Write-Warning "  Delete failed ($code) for $($item.Id)" }
+                    Start-Sleep -Seconds 10
+                } else { Write-Warning "  Delete failed ($code) for $itemId" }
             }
         }
         if ($deletedThisRound -eq 0) { break }  # avoid infinite loop if all deletes are blocked
