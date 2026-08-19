@@ -188,7 +188,14 @@ function Clear-SpList {
             Write-Warning "  List fetch error: $($_.Exception.Message) | $($_.ErrorDetails.Message)"
             $null
         }
-        $items = if ($listResult -and $listResult.value) { @($listResult.value) } else { @() }
+        # Debug: log what SP actually returned
+        if ($round -eq 1) {
+            Write-Host "  SP response type: $($listResult.GetType().Name) | value count: $(if($listResult.value -ne $null){@($listResult.value).Count}else{'null'}) | d.results: $(if($listResult.d.results -ne $null){@($listResult.d.results).Count}else{'null'})"
+        }
+        # Support both odata=nometadata (.value) and odata=verbose (.d.results) response formats
+        $items = if ($listResult -and $listResult.value) { @($listResult.value) }
+                 elseif ($listResult -and $listResult.d -and $listResult.d.results) { @($listResult.d.results) }
+                 else { @() }
         if ($items.Count -eq 0) { break }
         $deletedThisRound = 0
         foreach ($item in $items) {
