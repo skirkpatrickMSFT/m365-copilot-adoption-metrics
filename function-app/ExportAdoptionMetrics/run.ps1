@@ -184,13 +184,14 @@ function Clear-SpList {
     $round = 0
     do {
         $round++
-        $listResult = try { Invoke-RestMethod -Uri "${ListUrl}?`$select=Id&`$top=100" -Headers $readHdr } catch {
-            Write-Warning "  List fetch error: $($_.Exception.Message) | $($_.ErrorDetails.Message)"
+        $rawResp = try { Invoke-WebRequest -Uri "${ListUrl}?`$select=Id&`$top=100" -Headers $readHdr -UseBasicParsing } catch {
+            Write-Warning "  List fetch error: $($_.Exception.Message)"
             $null
         }
-        # Debug: log what SP actually returned
+        $listResult = if ($rawResp) { try { $rawResp.Content | ConvertFrom-Json } catch { $null } } else { $null }
+        # Debug: log response on first round only
         if ($round -eq 1) {
-            Write-Host "  SP response type: $($listResult.GetType().Name) | value count: $(if($listResult.value -ne $null){@($listResult.value).Count}else{'null'}) | d.results: $(if($listResult.d.results -ne $null){@($listResult.d.results).Count}else{'null'})"
+            Write-Host "  ContentType: $($rawResp.Headers.'Content-Type') | ParsedType: $($listResult.GetType().Name) | value count: $(if($listResult.value -ne $null){@($listResult.value).Count}else{'null'})"
         }
         # Support both odata=nometadata (.value) and odata=verbose (.d.results) response formats
         $items = if ($listResult -and $listResult.value) { @($listResult.value) }
