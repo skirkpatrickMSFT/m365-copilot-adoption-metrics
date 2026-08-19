@@ -47,7 +47,7 @@ $leaseId = $null
 try {
     $acqHdr = @{ 'Authorization' = "Bearer $storageToken"; 'x-ms-version' = '2021-08-06'; 'x-ms-lease-action' = 'acquire'; 'x-ms-lease-duration' = '60' }
     $leaseResp = Invoke-WebRequest -Uri "${lockUri}?comp=lease" -Method PUT -Headers $acqHdr -UseBasicParsing
-    $leaseId = $leaseResp.Headers['x-ms-lease-id']
+    $leaseId = [string]($leaseResp.Headers['x-ms-lease-id'] | Select-Object -First 1)
     Write-Host "Acquired export lock: $leaseId"
 } catch {
     Write-Warning 'Another export run already holds the lock. Exiting to avoid duplicate writes.'
