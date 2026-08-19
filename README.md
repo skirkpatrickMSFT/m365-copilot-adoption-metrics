@@ -239,6 +239,16 @@ For a historical backfill, first temporarily set `METRICS_LOOKBACK_DAYS` to cove
 
 **Agent registry (`SharePointCopilotAgentRegistry`):** Run `PullSharePointAgents` manually from Code + Test → Test/Run to trigger the initial `Audit.SharePoint` subscription and backfill any agents already created. If agents were created before deployment, temporarily set `TIME_WINDOW_MINUTES` to a large value (e.g. `500`) to cover the gap, then reset to `16`. Going forward, the registry updates automatically every 15 minutes — the function is append-only and will never overwrite existing entries.
 
+**Complete baseline scan (recommended for existing tenants):** The audit-log approach above is limited by Unified Audit Log retention (typically 90–180 days) and only captures events from when the `Audit.SharePoint` subscription was active. To inventory **every** `.agent` file currently in SharePoint — regardless of when it was created — run the standalone baseline script instead:
+
+```powershell
+.\scripts\Backfill-AgentRegistry.ps1 `
+  -TenantId "<your-tenant-id>" `
+  -SharePointSiteUrl "https://contoso.sharepoint.com/sites/CopilotReporting"
+```
+
+This uses the Microsoft Search API to find `.agent` files tenant-wide and inserts any not already in the registry (deduplicated by file URL, safe to re-run). Requires the `SharePointCopilotAgentRegistry` list to already exist (Step 7). Run this once as your initial baseline — `PullSharePointAgents` handles all agent creations going forward.
+
 ### 10. Build the Canvas Power App (optional)
 
 > The SharePoint lists work fully without the Power App — you can share list views directly or embed them as SharePoint list web parts. Build the Power App at any time later.
