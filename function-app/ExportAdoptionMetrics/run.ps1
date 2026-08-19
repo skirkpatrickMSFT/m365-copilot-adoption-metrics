@@ -191,7 +191,11 @@ function Clear-SpList {
         $listResult = if ($rawResp) { try { $rawResp.Content | ConvertFrom-Json } catch { $null } } else { $null }
         # Debug: log response on first round only
         if ($round -eq 1) {
-            Write-Host "  ContentType: $($rawResp.Headers.'Content-Type') | ParsedType: $($listResult.GetType().Name) | value count: $(if($listResult.value -ne $null){@($listResult.value).Count}else{'null'})"
+            $ct = if ($rawResp) { $rawResp.Headers.'Content-Type' } else { 'no response' }
+            $pt = if ($listResult -ne $null) { $listResult.GetType().Name } else { 'null' }
+            $vc = if ($listResult -and $listResult.value -ne $null) { @($listResult.value).Count } else { 'null' }
+            $raw173 = if ($rawResp -and $rawResp.Content.Length -lt 500) { $rawResp.Content } else { '(too long)' }
+            Write-Host "  ContentType: $ct | ParsedType: $pt | value count: $vc | raw: $raw173"
         }
         # Support both odata=nometadata (.value) and odata=verbose (.d.results) response formats
         $items = if ($listResult -and $listResult.value) { @($listResult.value) }
