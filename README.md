@@ -9,7 +9,7 @@ Two deployment paths are available:
 
 ## Deployment Modes
 
-The `deployLogAnalytics` parameter controls whether Log Analytics, Application Insights, and the AMPLS private endpoint are deployed. Both modes include the Function App, VNet, private endpoints, ADLS Gen2 audit storage, and the SharePoint Power App pipeline.
+The `deployLogAnalytics` parameter controls whether Log Analytics, Application Insights, and the AMPLS private endpoint are deployed. Both modes include the Function App, VNet, private endpoints, ADLS Gen2 audit storage, and the SharePoint Power App pipeline (Power App optional).  Full deployment will give you logs in log analytics and the visualizations in Azure Monitor as well as SharePoint. The SharePoint only path places the logs into storage then updates SharePoint with the metrics.
 
 | Component | Full (default) | Storage + SharePoint only |
 |-----------|:--------------:|:-------------------------:|
