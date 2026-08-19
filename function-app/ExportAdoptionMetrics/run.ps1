@@ -157,21 +157,26 @@ Invoke-RestMethod -Uri $firstSeenUri -Method PUT -Headers $saveHdr -Body ($first
 Invoke-RestMethod -Uri $aggregatesUri -Method PUT -Headers $saveHdr -Body ($dailyAggregates | ConvertTo-Json -Compress -Depth 5) | Out-Null
 
 # ── Write to SharePoint ───────────────────────────────────────────────────────
-# Delete ALL items from a list before rewriting — simpler and duplicate-proof.
+# Loop until empty: handles SharePoint pagination and single-item responses.
 function Clear-SpList {
     param([string]$ListUrl, [string]$Token)
     $readHdr  = @{ 'Authorization' = "Bearer $Token"; 'Accept' = 'application/json;odata=nometadata' }
     $writeHdr = @{ 'Authorization' = "Bearer $Token"; 'Accept' = 'application/json;odata=nometadata'; 'Content-Type' = 'application/json;odata=nometadata' }
-    $listResult = try { Invoke-RestMethod -Uri "${ListUrl}?`$select=Id&`$top=5000" -Headers $readHdr } catch { $null }
-    $all = if ($listResult -and $listResult.value) { @($listResult.value) } elseif ($listResult) { @($listResult) } else { @() }
-    Write-Host "  Clearing $($all.Count) item(s) from list..."
-    foreach ($item in $all) {
-        if (-not $item -or -not $item.Id) { continue }
-        $delHdr = $writeHdr.Clone(); $delHdr['IF-MATCH'] = '*'; $delHdr['X-HTTP-Method'] = 'DELETE'
-        try {
-            Invoke-WebRequest -Uri "${ListUrl}($($item.Id))" -Method POST -Headers $delHdr -UseBasicParsing | Out-Null
-        } catch { Write-Warning "  Failed to delete item $($item.Id): $($_.Exception.Message)" }
-    }
+    $totalDeleted = 0
+    do {
+        $listResult = try { Invoke-RestMethod -Uri "${ListUrl}?`$select=Id&`$top=100" -Headers $readHdr } catch { $null }
+        $items = if ($listResult -and $listResult.value) { @($listResult.value) } else { @() }
+        if ($items.Count -eq 0) { break }
+        foreach ($item in $items) {
+            if (-not $item -or -not $item.Id) { continue }
+            $delHdr = $writeHdr.Clone(); $delHdr['IF-MATCH'] = '*'; $delHdr['X-HTTP-Method'] = 'DELETE'
+            try {
+                Invoke-WebRequest -Uri "${ListUrl}($($item.Id))" -Method POST -Headers $delHdr -UseBasicParsing | Out-Null
+                $totalDeleted++
+            } catch { Write-Warning "  Delete failed for $($item.Id): $($_.Exception.Message)" }
+        }
+    } while ($items.Count -gt 0)
+    Write-Host "  Cleared $totalDeleted item(s)."
 }
 
 function Write-SpItem {
