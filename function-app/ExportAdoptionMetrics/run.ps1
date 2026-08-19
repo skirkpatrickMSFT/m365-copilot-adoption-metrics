@@ -174,51 +174,36 @@ Invoke-RestMethod -Uri $firstSeenUri -Method PUT -Headers $saveHdr -Body ($first
 Invoke-RestMethod -Uri $aggregatesUri -Method PUT -Headers $saveHdr -Body ($dailyAggregates | ConvertTo-Json -Compress -Depth 5) | Out-Null
 
 # ── Write to SharePoint ───────────────────────────────────────────────────────
-# Loop until empty: handles SharePoint pagination, throttling, and partial deletes.
-function Clear-SpList {
-    param([string]$ListUrl, [string]$Token)
+# Delete items from a list whose Title exactly matches any value in the provided set.
+# Uses Invoke-WebRequest + ConvertFrom-Json -AsHashtable because SharePoint's response
+# includes both "Id" and "ID" keys, which breaks Invoke-RestMethod auto-deserialization.
+function Remove-SpItemsByTitles {
+    param([string]$ListUrl, [string]$Token, [string[]]$Titles)
+    if (-not $Titles -or $Titles.Count -eq 0) { return }
     $readHdr  = @{ 'Authorization' = "Bearer $Token"; 'Accept' = 'application/json;odata=nometadata' }
     $writeHdr = @{ 'Authorization' = "Bearer $Token"; 'Accept' = 'application/json;odata=nometadata'; 'Content-Type' = 'application/json;odata=nometadata' }
-    $totalDeleted = 0
-    $maxRounds = 50  # safety cap against infinite loop if all deletes fail
-    $round = 0
-    do {
-        $round++
-        $rawResp = try { Invoke-WebRequest -Uri "${ListUrl}?`$select=Id&`$top=100" -Headers $readHdr -UseBasicParsing } catch {
-            Write-Warning "  List fetch error: $($_.Exception.Message)"
-            $null
+    $titleSet = [System.Collections.Generic.HashSet[string]]::new([string[]]$Titles)
+    $deleted  = 0
+
+    $rawResp = try { Invoke-WebRequest -Uri "${ListUrl}?`$select=Id,Title&`$top=5000" -Headers $readHdr -UseBasicParsing } catch { $null }
+    $parsed  = if ($rawResp) { try { $rawResp.Content | ConvertFrom-Json -AsHashtable } catch { $null } } else { $null }
+    $all     = if ($parsed -and $parsed.ContainsKey('value')) { @($parsed['value']) } else { @() }
+
+    foreach ($item in $all) {
+        $id    = if ($item -is [hashtable]) { $item['Id'] } else { $item.Id }
+        $title = if ($item -is [hashtable]) { $item['Title'] } else { $item.Title }
+        if (-not $id -or -not $titleSet.Contains($title)) { continue }
+        $delHdr = $writeHdr.Clone(); $delHdr['IF-MATCH'] = '*'; $delHdr['X-HTTP-Method'] = 'DELETE'
+        try {
+            Invoke-WebRequest -Uri "${ListUrl}($id)" -Method POST -Headers $delHdr -UseBasicParsing | Out-Null
+            $deleted++
+        } catch {
+            $code = $_.Exception.Response.StatusCode.value__
+            if ($code -eq 429 -or $code -eq 503) { Start-Sleep -Seconds 10 }
+            else { Write-Warning "  Delete failed ($code) for $id" }
         }
-        $listResult = if ($rawResp) { try { $rawResp.Content | ConvertFrom-Json -AsHashtable } catch { $null } } else { $null }
-        # Debug: log response on first round only
-        if ($round -eq 1) {
-            $ct = if ($rawResp) { $rawResp.Headers.'Content-Type' } else { 'no response' }
-            $pt = if ($listResult -ne $null) { $listResult.GetType().Name } else { 'null' }
-            $vc = if ($listResult -and $listResult.ContainsKey('value')) { @($listResult['value']).Count } else { 'null' }
-            Write-Host "  ContentType: $ct | ParsedType: $pt | value count: $vc"
-        }
-        $rawItems = if ($listResult -and $listResult.ContainsKey('value')) { @($listResult['value']) }
-                    elseif ($listResult -and $listResult.ContainsKey('d')) { @($listResult['d']['results']) }
-                    else { @() }
-        $items = $rawItems | Where-Object { $_ -and ($_['Id'] -or $_.Id) }
-        if ($items.Count -eq 0) { break }
-        $deletedThisRound = 0
-        foreach ($item in $items) {
-            $itemId = if ($item -is [hashtable]) { $item['Id'] } else { $item.Id }
-            if (-not $itemId) { continue }
-            $delHdr = $writeHdr.Clone(); $delHdr['IF-MATCH'] = '*'; $delHdr['X-HTTP-Method'] = 'DELETE'
-            try {
-                Invoke-WebRequest -Uri "${ListUrl}($itemId)" -Method POST -Headers $delHdr -UseBasicParsing | Out-Null
-                $totalDeleted++; $deletedThisRound++
-            } catch {
-                $code = $_.Exception.Response.StatusCode.value__
-                if ($code -eq 429 -or $code -eq 503) {
-                    Start-Sleep -Seconds 10
-                } else { Write-Warning "  Delete failed ($code) for $itemId" }
-            }
-        }
-        if ($deletedThisRound -eq 0) { break }  # avoid infinite loop if all deletes are blocked
-    } while ($round -lt $maxRounds)
-    Write-Host "  Cleared $totalDeleted item(s) in $round round(s)."
+    }
+    Write-Host "  Deleted $deleted item(s) matching $($Titles.Count) title(s)."
 }
 
 function Write-SpItem {
@@ -234,19 +219,35 @@ $appApiBase       = "$spSiteUrl/_api/web/lists/getbytitle('$spAppList')/items"
 $weeklyApiBase    = "$spSiteUrl/_api/web/lists/getbytitle('$spWeeklyList')/items"
 $weeklyAppApiBase = "$spSiteUrl/_api/web/lists/getbytitle('$spWeeklyAppList')/items"
 
-$allAggDates   = @($dailyAggregates.Keys | Sort-Object)
-$allWeeks      = $allAggDates | ForEach-Object { (Get-WeekStart ([datetime]$_)).ToString('yyyy-MM-dd') } | Select-Object -Unique
 $affectedWeeks = $datesToProcess | ForEach-Object { (Get-WeekStart ([datetime]$_)).ToString('yyyy-MM-dd') } | Select-Object -Unique
 
-# Clear entire lists before rewriting — guarantees no duplicates regardless of run count
-Write-Host "Clearing SharePoint lists..."
-Clear-SpList -ListUrl $dailyApiBase     -Token $spToken
-Clear-SpList -ListUrl $appApiBase       -Token $spToken
-Clear-SpList -ListUrl $weeklyApiBase    -Token $spToken
-Clear-SpList -ListUrl $weeklyAppApiBase -Token $spToken
+# Only touch the specific dates/weeks affected by this run — scales to years of history
+$dailyTitles = [string[]]@($datesToProcess | Where-Object { $dailyAggregates[$_] })
+$appTitles   = [string[]]@(
+    foreach ($d in $datesToProcess) {
+        $agg = $dailyAggregates[$d]; if (-not $agg) { continue }
+        foreach ($app in $agg.appCounts.PSObject.Properties) { "$d|$($app.Name)" }
+    }
+)
+$weeklyTitles = [string[]]@($affectedWeeks)
+$weeklyAppTitles = [string[]]@(
+    foreach ($ws in $affectedWeeks) {
+        foreach ($offset in 0..6) {
+            $wd  = ([datetime]$ws).AddDays($offset).ToString('yyyy-MM-dd')
+            $agg = $dailyAggregates[$wd]; if (-not $agg) { continue }
+            foreach ($app in $agg.appCounts.PSObject.Properties) { "$ws|$($app.Name)" }
+        }
+    }
+)
+
+Write-Host "Clearing $($dailyTitles.Count) daily, $($appTitles.Count) app, $($weeklyTitles.Count) weekly, $($weeklyAppTitles.Count) weeklyApp row(s) to be rewritten..."
+Remove-SpItemsByTitles -ListUrl $dailyApiBase     -Token $spToken -Titles $dailyTitles
+Remove-SpItemsByTitles -ListUrl $appApiBase       -Token $spToken -Titles $appTitles
+Remove-SpItemsByTitles -ListUrl $weeklyApiBase    -Token $spToken -Titles $weeklyTitles
+Remove-SpItemsByTitles -ListUrl $weeklyAppApiBase -Token $spToken -Titles $weeklyAppTitles
 
 Write-Host "Writing daily and app rows..."
-foreach ($dateStr in $allAggDates) {
+foreach ($dateStr in $datesToProcess) {
     $agg = $dailyAggregates[$dateStr]
     if (-not $agg) { continue }
 
@@ -269,8 +270,8 @@ foreach ($dateStr in $allAggDates) {
 }
 
 # ── Weekly rollup — recompute from stored daily aggregates, no blob re-reads ─
-Write-Host "Writing $($allWeeks.Count) week(s)..."
-foreach ($ws in $allWeeks) {
+Write-Host "Writing $($affectedWeeks.Count) week(s)..."
+foreach ($ws in $affectedWeeks) {
     $we       = ([datetime]$ws).AddDays(6).ToString('yyyy-MM-dd')
     $weekDays = 0..6 | ForEach-Object { ([datetime]$ws).AddDays($_).ToString('yyyy-MM-dd') }
     $totalInter = 0; $totalDAU = 0; $totalNew = 0
