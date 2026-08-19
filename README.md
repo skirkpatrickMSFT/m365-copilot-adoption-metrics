@@ -46,7 +46,7 @@ ExportAdoptionMetrics      Azure Monitor Workbook
 (every 4 h, incremental)   (near-real-time KQL dashboard)
    │
    ▼
-SharePoint Lists ──▶ Canvas Power App Dashboard
+SharePoint Lists ──▶ Optional - Canvas Power App Dashboard
 (CopilotDailyMetrics,    (long-term adoption reporting)
  CopilotAppMetrics,
  CopilotWeeklyMetrics,
