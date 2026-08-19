@@ -157,26 +157,36 @@ Invoke-RestMethod -Uri $firstSeenUri -Method PUT -Headers $saveHdr -Body ($first
 Invoke-RestMethod -Uri $aggregatesUri -Method PUT -Headers $saveHdr -Body ($dailyAggregates | ConvertTo-Json -Compress -Depth 5) | Out-Null
 
 # ── Write to SharePoint ───────────────────────────────────────────────────────
-# Loop until empty: handles SharePoint pagination and single-item responses.
+# Loop until empty: handles SharePoint pagination, throttling, and partial deletes.
 function Clear-SpList {
     param([string]$ListUrl, [string]$Token)
     $readHdr  = @{ 'Authorization' = "Bearer $Token"; 'Accept' = 'application/json;odata=nometadata' }
     $writeHdr = @{ 'Authorization' = "Bearer $Token"; 'Accept' = 'application/json;odata=nometadata'; 'Content-Type' = 'application/json;odata=nometadata' }
     $totalDeleted = 0
+    $maxRounds = 50  # safety cap against infinite loop if all deletes fail
+    $round = 0
     do {
+        $round++
         $listResult = try { Invoke-RestMethod -Uri "${ListUrl}?`$select=Id&`$top=100" -Headers $readHdr } catch { $null }
         $items = if ($listResult -and $listResult.value) { @($listResult.value) } else { @() }
         if ($items.Count -eq 0) { break }
+        $deletedThisRound = 0
         foreach ($item in $items) {
             if (-not $item -or -not $item.Id) { continue }
             $delHdr = $writeHdr.Clone(); $delHdr['IF-MATCH'] = '*'; $delHdr['X-HTTP-Method'] = 'DELETE'
             try {
-                Invoke-WebRequest -Uri "${ListUrl}($($item.Id))" -Method POST -Headers $delHdr -UseBasicParsing | Out-Null
-                $totalDeleted++
-            } catch { Write-Warning "  Delete failed for $($item.Id): $($_.Exception.Message)" }
+                $resp = Invoke-WebRequest -Uri "${ListUrl}($($item.Id))" -Method POST -Headers $delHdr -UseBasicParsing
+                $totalDeleted++; $deletedThisRound++
+            } catch {
+                $code = $_.Exception.Response.StatusCode.value__
+                if ($code -eq 429 -or $code -eq 503) {
+                    Start-Sleep -Seconds 10  # back off on throttle and retry next round
+                } else { Write-Warning "  Delete failed ($code) for $($item.Id)" }
+            }
         }
-    } while ($items.Count -gt 0)
-    Write-Host "  Cleared $totalDeleted item(s)."
+        if ($deletedThisRound -eq 0) { break }  # avoid infinite loop if all deletes are blocked
+    } while ($round -lt $maxRounds)
+    Write-Host "  Cleared $totalDeleted item(s) in $round round(s)."
 }
 
 function Write-SpItem {
