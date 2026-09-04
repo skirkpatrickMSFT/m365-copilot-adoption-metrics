@@ -207,14 +207,22 @@ foreach ($dateStr in $datesToProcess) {
     Write-Host "  Parsed $newEventCount new event(s)."
 
     $appUserCounts = @{}
-    foreach ($app in $appUserSets.Keys) { $appUserCounts[$app] = $appUserSets[$app].Count }
+    $appUserIds    = @{}
+    foreach ($app in $appUserSets.Keys) {
+        $appUserCounts[$app] = $appUserSets[$app].Count
+        $appUserIds[$app]    = @($appUserSets[$app])
+    }
 
+    # users/appUserIds hold the distinct user IDs so the weekly rollup can union
+    # them across the 7 days rather than summing daily counts (which double-counts).
     $dailyAggregates[$dateStr] = [pscustomobject]@{
         dau          = $userSet.Count
         interactions = $interactions
         newUsers     = @($firstSeenMap.GetEnumerator() | Where-Object { $_.Value -eq $dateStr }).Count
         appCounts    = [pscustomobject]$appCounts
         appUsers     = [pscustomobject]$appUserCounts
+        users        = @($userSet)
+        appUserIds   = [pscustomobject]$appUserIds
     }
 }
 
@@ -338,20 +346,32 @@ Write-Host "Writing $($affectedWeeks.Count) week(s)..."
 foreach ($ws in $affectedWeeks) {
     $we       = ([datetime]$ws).AddDays(6).ToString('yyyy-MM-dd')
     $weekDays = 0..6 | ForEach-Object { ([datetime]$ws).AddDays($_).ToString('yyyy-MM-dd') }
-    $totalInter = 0; $totalDAU = 0; $totalNew = 0
-    $appWkCounts = @{}; $appWkUsers = @{}; $allApps = [System.Collections.Generic.HashSet[string]]::new()
+    $totalInter = 0; $totalNew = 0; $legacyDAU = 0
+    $weekUsers  = [System.Collections.Generic.HashSet[string]]::new()
+    $appWkCounts = @{}; $appWkUserSets = @{}; $appWkUsersLegacy = @{}; $allApps = [System.Collections.Generic.HashSet[string]]::new()
 
     foreach ($wd in $weekDays) {
         $agg = $dailyAggregates[$wd]; if (-not $agg) { continue }
         $totalInter += $agg.interactions
-        $totalDAU   += $agg.dau
         $totalNew   += $agg.newUsers
+        # Union distinct user IDs across the week. Aggregates written before this
+        # fix only stored a daily count, so fall back to summing DAU for those.
+        if ($agg.users) { foreach ($u in @($agg.users)) { if ($u) { $weekUsers.Add([string]$u) | Out-Null } } }
+        else            { $legacyDAU += [int]$agg.dau }
         foreach ($app in $agg.appCounts.PSObject.Properties) {
             $allApps.Add($app.Name) | Out-Null
-            if (-not $appWkCounts.ContainsKey($app.Name)) { $appWkCounts[$app.Name] = 0; $appWkUsers[$app.Name] = 0 }
+            if (-not $appWkCounts.ContainsKey($app.Name)) {
+                $appWkCounts[$app.Name] = 0
+                $appWkUserSets[$app.Name] = [System.Collections.Generic.HashSet[string]]::new()
+                $appWkUsersLegacy[$app.Name] = 0
+            }
             $appWkCounts[$app.Name] += $app.Value
-            $u = ($agg.appUsers.PSObject.Properties | Where-Object { $_.Name -eq $app.Name } | Select-Object -ExpandProperty Value)
-            $appWkUsers[$app.Name] += [int]$u
+            $ids = if ($agg.appUserIds) { $agg.appUserIds.PSObject.Properties | Where-Object { $_.Name -eq $app.Name } | Select-Object -ExpandProperty Value } else { $null }
+            if ($null -ne $ids) { foreach ($id in @($ids)) { if ($id) { $appWkUserSets[$app.Name].Add([string]$id) | Out-Null } } }
+            else {
+                $u = ($agg.appUsers.PSObject.Properties | Where-Object { $_.Name -eq $app.Name } | Select-Object -ExpandProperty Value)
+                $appWkUsersLegacy[$app.Name] += [int]$u
+            }
         }
     }
 
@@ -359,7 +379,7 @@ foreach ($ws in $affectedWeeks) {
         WeekStart         = $ws
         WeekEnd           = $we
         TotalInteractions = $totalInter
-        UniqueUsers       = $totalDAU
+        UniqueUsers       = ($weekUsers.Count + $legacyDAU)
         NewUsers          = $totalNew
         AppsUsed          = ($allApps | Sort-Object) -join ', '
     }
@@ -369,7 +389,7 @@ foreach ($ws in $affectedWeeks) {
             WeekStart    = $ws
             AppHost      = $app
             Interactions = $appWkCounts[$app]
-            Users        = $appWkUsers[$app]
+            Users        = ($appWkUserSets[$app].Count + $appWkUsersLegacy[$app])
         }
     }
 }
