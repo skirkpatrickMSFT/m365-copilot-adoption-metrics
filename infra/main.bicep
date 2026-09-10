@@ -1,4 +1,15 @@
-@description('Azure region for all resources')
+// Copilot audit ingestion platform — secure Flex Consumption deployment.
+// Hosts the PowerShell functions on an Azure Functions Flex Consumption (FC1) plan behind a
+// private, VNet-integrated, identity-based architecture (VNet, private endpoints, AMPLS,
+// DCR/Log Analytics, identity-based storage — no shared keys).
+// Flex Consumption specifics:
+//   - serverfarm SKU FC1 / FlexConsumption (Linux)
+//   - functionApp uses functionAppConfig (runtime + identity-based deployment container + scale)
+//   - snet-func-out delegated to Microsoft.App/environments (Flex requirement, not Microsoft.Web/serverFarms)
+//   - runtime declared in functionAppConfig (no FUNCTIONS_EXTENSION_VERSION / FUNCTIONS_WORKER_RUNTIME)
+// Prereq: register the Microsoft.App resource provider in the subscription before deploying.
+
+@description('Azure region for all resources (must be a Flex Consumption supported region)')
 param location string = resourceGroup().location
 
 @description('Your Microsoft Entra tenant ID')
@@ -25,7 +36,7 @@ param auditStorageName string
 param funcStorageName string
 
 @description('Name for the Function App')
-param funcAppName string = 'func-copilot-audit-ingest'
+param funcAppName string = 'func-copilot-audit-flex'
 
 @description('Name for the Virtual Network')
 param vnetName string = 'vnet-copilot-adoption'
@@ -33,14 +44,30 @@ param vnetName string = 'vnet-copilot-adoption'
 @description('Custom table name (without _CL suffix)')
 param tableName string = 'CopilotAudit'
 
+@description('Blob container used by Flex Consumption to store the deployment package')
+param deploymentContainerName string = 'app-package'
+
 @description('SharePoint site URL for the Canvas Power App dashboard (e.g. https://contoso.sharepoint.com/sites/CopilotReporting). Leave empty to skip the metrics export function.')
 param sharepointSiteUrl string = ''
 
 @description('Number of days to scan for unprocessed dates on first run or manual backfill.')
 param metricsLookbackDays int = 7
 
+@description('Flex Consumption instance memory (MB): 512, 2048, or 4096.')
+@allowed([512, 2048, 4096])
+param instanceMemoryMB int = 2048
+
+@description('Flex Consumption maximum on-demand instance count.')
+@minValue(1)
+@maxValue(1000)
+param maximumInstanceCount int = 40
+
 @description('Deploy Log Analytics workspace, DCE, DCR, and Application Insights. Set to false for a storage-only deployment that uses only the SharePoint Power App dashboard.')
 param deployLogAnalytics bool = true
+
+@description('AMPLS ingestion access mode. PrivateOnly for production; Open permits public ingestion (useful for lab validation without full private telemetry routing).')
+@allowed(['PrivateOnly', 'Open'])
+param amplsIngestionAccessMode string = 'PrivateOnly'
 
 // Cloud-specific endpoint mappings
 var cloudEndpoints = {
@@ -142,9 +169,10 @@ resource vnet 'Microsoft.Network/virtualNetworks@2024-01-01' = {
           addressPrefix: '10.0.2.0/24'
           delegations: [
             {
-              name: 'delegation-web'
+              name: 'delegation-app'
               properties: {
-                serviceName: 'Microsoft.Web/serverFarms'
+                // Flex Consumption requires Microsoft.App/environments delegation (not Microsoft.Web/serverFarms).
+                serviceName: 'Microsoft.App/environments'
               }
             }
           ]
@@ -317,17 +345,22 @@ resource funcStorage 'Microsoft.Storage/storageAccounts@2023-05-01' = {
   }
 }
 
-// App Service Plan (Elastic Premium)
+// Deployment package container used by Flex Consumption (identity-based access)
+resource funcDeployContainer 'Microsoft.Storage/storageAccounts/blobServices/containers@2023-05-01' = {
+  name: '${funcStorage.name}/default/${deploymentContainerName}'
+}
+
+// App Service Plan (Flex Consumption)
 resource asp 'Microsoft.Web/serverfarms@2023-12-01' = {
-  name: 'asp-copilot-adoption'
+  name: 'asp-copilot-flex'
   location: location
-  kind: 'elastic'
+  kind: 'functionapp'
   sku: {
-    name: 'EP1'
-    tier: 'ElasticPremium'
+    name: 'FC1'
+    tier: 'FlexConsumption'
   }
   properties: {
-    maximumElasticWorkerCount: 20
+    reserved: true
   }
 }
 
@@ -342,11 +375,11 @@ resource appInsights 'Microsoft.Insights/components@2020-02-02' = if (deployLogA
   }
 }
 
-// Function App
+// Function App (Flex Consumption)
 resource funcApp 'Microsoft.Web/sites@2023-12-01' = {
   name: funcAppName
   location: location
-  kind: 'functionapp'
+  kind: 'functionapp,linux'
   identity: {
     type: 'SystemAssigned'
   }
@@ -355,13 +388,27 @@ resource funcApp 'Microsoft.Web/sites@2023-12-01' = {
     httpsOnly: true
     publicNetworkAccess: 'Disabled'
     virtualNetworkSubnetId: vnet.properties.subnets[1].id
-    vnetRouteAllEnabled: true
+    functionAppConfig: {
+      deployment: {
+        storage: {
+          type: 'blobContainer'
+          value: '${funcStorage.properties.primaryEndpoints.blob}${deploymentContainerName}'
+          authentication: {
+            type: 'SystemAssignedIdentity'
+          }
+        }
+      }
+      scaleAndConcurrency: {
+        maximumInstanceCount: maximumInstanceCount
+        instanceMemoryMB: instanceMemoryMB
+      }
+      runtime: {
+        name: 'powershell'
+        version: '7.4'
+      }
+    }
     siteConfig: {
-      powerShellVersion: '7.4'
-      netFrameworkVersion: 'v8.0'
       appSettings: [
-        { name: 'FUNCTIONS_EXTENSION_VERSION', value: '~4' }
-        { name: 'FUNCTIONS_WORKER_RUNTIME', value: 'powershell' }
         { name: 'AzureWebJobsStorage__accountName', value: funcStorage.name }
         { name: 'AzureWebJobsStorage__credential', value: 'managedidentity' }
         { name: 'APPLICATIONINSIGHTS_CONNECTION_STRING', value: deployLogAnalytics ? appInsights.properties.ConnectionString : '' }
@@ -372,6 +419,7 @@ resource funcApp 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'STORAGE_ACCOUNT_NAME', value: auditStorage.name }
         { name: 'STORAGE_CONTAINER_NAME', value: 'copilot-logs' }
         { name: 'TIME_WINDOW_MINUTES', value: '16' }
+        { name: 'AGENT_STUDIO_WINDOW_MINUTES', value: '16' }
         { name: 'CLOUD_ENVIRONMENT', value: cloudEnvironment }
         { name: 'MGMT_API_BASE', value: selectedCloud.managementApi }
         { name: 'MONITOR_AUDIENCE', value: selectedCloud.monitorAudience }
@@ -383,6 +431,7 @@ resource funcApp 'Microsoft.Web/sites@2023-12-01' = {
         { name: 'SHAREPOINT_WEEKLY_LIST', value: 'CopilotWeeklyMetrics' }
         { name: 'SHAREPOINT_WEEKLY_APP_LIST', value: 'CopilotWeeklyAppMetrics' }
         { name: 'SHAREPOINT_AGENT_LIST', value: 'SharePointCopilotAgentRegistry' }
+        { name: 'SHAREPOINT_AGENT_STUDIO_LIST', value: 'CopilotStudioAgentRegistry' }
         { name: 'METRICS_LOOKBACK_DAYS', value: string(metricsLookbackDays) }
         { name: 'METRICS_EXPORT_SCHEDULE', value: '0 0 */4 * * *' }
       ]
@@ -584,7 +633,7 @@ resource ampls 'Microsoft.Insights/privateLinkScopes@2021-07-01-preview' = if (d
   location: 'global'
   properties: {
     accessModeSettings: {
-      ingestionAccessMode: 'PrivateOnly'
+      ingestionAccessMode: amplsIngestionAccessMode
       queryAccessMode: 'Open'
     }
   }
@@ -666,7 +715,7 @@ resource roleBlobContributor 'Microsoft.Authorization/roleAssignments@2022-04-01
   }
 }
 
-// Storage Blob Data Owner on func storage for Function App
+// Storage Blob Data Owner on func storage for Function App (also covers the Flex deployment container)
 resource roleFuncBlobOwner 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   name: guid(funcStorage.id, funcApp.id, 'b7e6dc6d-f1e8-4753-8033-0f276bb0955b')
   scope: funcStorage
@@ -707,4 +756,4 @@ output dcrImmutableId string = deployLogAnalytics ? dcr.properties.immutableId :
 output streamName string = deployLogAnalytics ? 'Custom-${tableName}_CL' : ''
 output lawWorkspaceId string = deployLogAnalytics ? law.properties.customerId : ''
 output auditStorageName string = auditStorage.name
-output postDeployMessage string = 'After deployment: 1) Grant ActivityFeed.Read to the Function App identity (${funcApp.identity.principalId}) via PowerShell. 2) Start the Audit.General subscription. 3) Deploy the function code. 4) Clear profile.ps1. See README.md for details.'
+output postDeployMessage string = 'Flex Consumption deploy complete. 1) Grant ActivityFeed.Read to the Function App identity (${funcApp.identity.principalId}). 2) Start the Audit.General subscription. 3) Deploy code: func azure functionapp publish ${funcApp.name}. 4) Clear profile.ps1. Prereq: Microsoft.App resource provider must be registered. See README.md.'

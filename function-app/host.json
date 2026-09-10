@@ -4,5 +4,17 @@
     "id": "Microsoft.Azure.Functions.ExtensionBundle",
     "version": "[4.*, 5.0.0)"
   },
-  "functionTimeout": "00:10:00"
+  "functionTimeout": "00:10:00",
+  "logging": {
+    "logLevel": {
+      "default": "Information",
+      "Function": "Information"
+    },
+    "applicationInsights": {
+      "samplingSettings": {
+        "isEnabled": false
+      },
+      "enableLiveMetricsFilters": true
+    }
+  }
 }

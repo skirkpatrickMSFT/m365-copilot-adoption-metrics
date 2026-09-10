@@ -30,7 +30,7 @@ Steps marked **(Log Analytics only)** below apply only to the full deployment.
 Office 365 Management Activity API (manage.office.com)
         │ every 15 min (PullCopilotAudit timer)
         ▼
-Azure Function App (Premium EP1, PowerShell 7.4)
+Azure Function App (Flex Consumption FC1, PowerShell 7.4)
   • Managed Identity auth — no secrets, no shared keys
   • Pagination, 500-event chunking, 429 throttle retry
   • State-tracked processing — no duplicate events
@@ -57,7 +57,7 @@ SharePoint Lists ──▶ Optional - Canvas Power App Dashboard
 
 | Requirement | Details |
 |------------|---------|
-| Azure Subscription | Contributor role, Elastic Premium VM quota ≥ 1 |
+| Azure Subscription | Contributor role; `Microsoft.App` resource provider registered (Flex Consumption) |
 | Microsoft 365 | E5 or Copilot add-on with Unified Audit Log enabled |
 | Copilot Licenses | Assigned to users who actively use Copilot |
 | Local PowerShell | Microsoft.Graph module (`Install-Module Microsoft.Graph`) |
@@ -320,7 +320,7 @@ For the near-real-time Log Analytics dashboard:
 
 | Decision | Rationale |
 |----------|-----------|
-| Premium EP1 (not Consumption/Flex) | Only plan supporting VNet integration + private endpoints for PowerShell functions |
+| Flex Consumption (FC1) | Serverless PowerShell 7.4 host with VNet integration + private endpoints; pay-per-execution with no always-on Premium plan cost |
 | Managed Identity (no secrets) | NIST SP 800-53 compliance; `allowSharedKeyAccess: false` on all storage |
 | `Sites.Selected` (not `Sites.ReadWrite.All`) | Least-privilege SharePoint access scoped to a single site |
 | `parse_json(CopilotEventData).AppHost` | AppHost is nested inside `CopilotEventData` in raw audit events, not top-level |
