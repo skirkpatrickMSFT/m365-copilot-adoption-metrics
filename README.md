@@ -107,18 +107,43 @@ Run **locally** — Cloud Shell cannot acquire tokens for manage.office.com:
 .\scripts\Post-Deploy.ps1 `
   -TenantId <your-tenant-id> `
   -FunctionAppPrincipalId <from-deployment-output> `
-  -CloudEnvironment Commercial `
-  -SharePointSiteUrl https://contoso.sharepoint.com/sites/CopilotReporting
+  -CloudEnvironment Commercial
 ```
 
 The `FunctionAppPrincipalId` is in the deployment output as `functionAppPrincipalId`.
 
-This script:
-- Grants `ActivityFeed.Read` to the Function App managed identity (for the Office 365 Audit API)
-- Grants `Sites.Selected` + site-scoped write to the managed identity (for SharePoint export)
-- Prints the exact SharePoint list column schema to create
+This script grants `ActivityFeed.Read` to the Function App managed identity (for the Office 365 Audit API). It does **not** grant SharePoint access — see the next section.
 
 A browser sign-in popup will appear — check your taskbar if it opens behind other windows.
+
+#### 2b. Grant SharePoint site access (required for the SharePoint lists)
+
+The Function App identity needs two things before it can write to the reporting site. Without them, SharePoint calls fail with `401 Unauthorized`.
+
+1. **App role:** assign `Sites.Selected` on *Office 365 SharePoint Online* to the identity. This can be done with an account that can manage app role assignments:
+
+   ```powershell
+   Connect-MgGraph -Scopes "AppRoleAssignment.ReadWrite.All" -TenantId <your-tenant-id>
+   $spo  = (Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/servicePrincipals?`$filter=appId eq '00000003-0000-0ff1-ce00-000000000000'").value[0]
+   $role = $spo.appRoles | Where-Object value -eq 'Sites.Selected'
+   Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/<functionAppPrincipalId>/appRoleAssignments" `
+     -Body (@{ principalId = '<functionAppPrincipalId>'; resourceId = $spo.id; appRoleId = $role.id } | ConvertTo-Json) -ContentType 'application/json'
+   ```
+
+2. **Site grant:** give that identity `write` on the reporting site. This needs a sign-in with `Sites.FullControl.All` (admin consent):
+
+   ```powershell
+   Connect-MgGraph -Scopes "Sites.FullControl.All" -TenantId <your-tenant-id>
+   $site = Invoke-MgGraphRequest -Method GET -Uri "https://graph.microsoft.com/v1.0/sites/<tenant>.sharepoint.com:/sites/CopilotReporting"
+   $body = @{ roles = @('write'); grantedToIdentities = @(@{ application = @{ id = '<identity-client-id>'; displayName = '<function-app-name>' } }) } | ConvertTo-Json -Depth 5
+   Invoke-MgGraphRequest -Method POST -Uri "https://graph.microsoft.com/v1.0/sites/$($site.id)/permissions" -Body $body -ContentType 'application/json'
+   ```
+
+   `<identity-client-id>` is the identity's application (client) ID, not its object ID. To confirm the grant, list `https://graph.microsoft.com/v1.0/sites/<site-id>/permissions` and check the app has `write`.
+
+> **Notes**
+> - If your tenant requires passkey sign-in, run `Set-MgGraphOption -EnableLoginByWAM $true` before `Connect-MgGraph` so the Windows broker handles the sign-in.
+> - Managed-identity tokens are cached for up to about 24 hours. After granting a new role, the app may keep returning `401` until the cached token expires.
 
 ### 3. Enable Auditing in Microsoft Purview
 
@@ -161,7 +186,7 @@ Check Application Insights logs for `"status":"enabled"`. Once confirmed, you ca
 
 ### 7. Set Up SharePoint Lists
 
-Create these four lists at your SharePoint site. Column names must match exactly.
+Create these lists at your SharePoint site (the six below, including the agent registry and inactive-agents lists). Column names must match exactly.
 
 **CopilotDailyMetrics**
 | Column | Type |
@@ -203,7 +228,7 @@ Create these four lists at your SharePoint site. Column names must match exactly
 
 > To hide the Title column from view: column header → **Column settings → Hide in view**.
 
-**SharePointCopilotAgentRegistry** — running log of every Copilot agent created, updated automatically by `PullSharePointAgents`.
+**SharePointCopilotAgentRegistry** — running log of every Copilot agent created, updated automatically by `PullSharePointAgents`. `ExportAdoptionMetrics` also maintains the last three columns from Copilot interaction audit events.
 
 | Column | Type |
 |--------|------|
@@ -213,6 +238,28 @@ Create these four lists at your SharePoint site. Column names must match exactly
 | AgentFileUrl | Single line of text |
 | CreatedBy | Single line of text |
 | CreatedDate | Date and time |
+| LastUsedDate | Date and time |
+| UseCount | Number |
+| AgentPlatformID | Single line of text |
+
+**CopilotInactiveAgents** — rewritten on every `ExportAdoptionMetrics` run. One `Summary` row plus one row per agent not used in `AGENT_INACTIVE_DAYS` (default 60) or more days. Agents never used are measured from `CreatedDate`.
+
+| Column | Type |
+|--------|------|
+| Title | Single line of text (built-in — `Summary` or the agent name) |
+| RowType | Single line of text (`Summary` or `InactiveAgent`) |
+| AgentName | Single line of text |
+| SiteUrl | Single line of text |
+| CreatedDate | Date and time |
+| LastUsedDate | Date and time |
+| UseCount | Number |
+| DaysInactive | Number |
+| TotalAgents | Number (Summary row) |
+| InactiveCount | Number (Summary row) |
+| ThresholdDays | Number (Summary row) |
+| RunDate | Date and time (Summary row) |
+
+> Agent usage is read from `TargetAgentName` / `TargetPlatformAgentId` on Copilot interaction events. Registry rows are matched to usage by `AgentPlatformID` first (filled in automatically on the first match), then by agent name (case-insensitive; site-qualified if several rows share a name). Usage that matches no registry row (for example built-in or site-default agents) is listed in the function log under "Usage not matched to a registry row". `UseCount` and `LastUsedDate` never decrease. They reflect usage seen by this pipeline, so agents used before it started may show as unused until the optional rebuild (step 9) is run.
 
 ### 8. Add Function App Environment Variables
 
@@ -226,6 +273,9 @@ Portal → Function App → **Settings → Environment variables** → + Add eac
 | `SHAREPOINT_WEEKLY_LIST` | `CopilotWeeklyMetrics` |
 | `SHAREPOINT_WEEKLY_APP_LIST` | `CopilotWeeklyAppMetrics` |
 | `SHAREPOINT_AGENT_LIST` | `SharePointCopilotAgentRegistry` |
+| `SHAREPOINT_INACTIVE_AGENT_LIST` | `CopilotInactiveAgents` |
+| `AGENT_INACTIVE_DAYS` | `60` (days without use before an agent is listed as inactive) |
+| `AGENT_USAGE_REBUILD_DAYS` | `0` (optional; set to e.g. `90` for a one-time usage rebuild, then reset to `0`) |
 | `METRICS_LOOKBACK_DAYS` | `7` (set to a larger number for initial backfill) |
 | `METRICS_EXPORT_SCHEDULE` | `0 0 */4 * * *` (every 4 hours; adjust as needed) |
 
@@ -237,7 +287,9 @@ Trigger the initial export manually. Portal → **ExportAdoptionMetrics** → **
 
 For a historical backfill, first temporarily set `METRICS_LOOKBACK_DAYS` to cover your full data range (e.g. `90`), run once, then reset to `7`.
 
-**Agent registry (`SharePointCopilotAgentRegistry`):** Run `PullSharePointAgents` manually from Code + Test → Test/Run to trigger the initial `Audit.SharePoint` subscription and backfill any agents already created. If agents were created before deployment, temporarily set `TIME_WINDOW_MINUTES` to a large value (e.g. `500`) to cover the gap, then reset to `16`. Going forward, the registry updates automatically every 15 minutes — the function is append-only and will never overwrite existing entries.
+**Agent registry (`SharePointCopilotAgentRegistry`):** Run `PullSharePointAgents` manually from Code + Test → Test/Run to trigger the initial `Audit.SharePoint` subscription and backfill any agents already created. If agents were created before deployment, temporarily set `TIME_WINDOW_MINUTES` to a large value (e.g. `500`) to cover the gap, then reset to `16`. Going forward, the registry updates automatically every 15 minutes — `PullSharePointAgents` is append-only and never overwrites existing entries (only `ExportAdoptionMetrics` updates the `LastUsedDate`, `UseCount` and `AgentPlatformID` columns).
+
+**Agent usage history (optional):** `LastUsedDate`, `UseCount` and `CopilotInactiveAgents` are built from blobs processed after this feature is deployed. To include earlier history already in ADLS, temporarily set `AGENT_USAGE_REBUILD_DAYS` (e.g. `90`), run `ExportAdoptionMetrics` once, then set it back to `0`. The rebuild rescans every blob in that window, so keep it to a range the function timeout can handle.
 
 **Complete baseline scan (recommended for existing tenants):** The audit-log approach above is limited by Unified Audit Log retention (typically 90–180 days) and only captures events from when the `Audit.SharePoint` subscription was active. To inventory **every** `.agent` file currently in SharePoint — regardless of when it was created — run the standalone baseline script instead:
 
@@ -264,7 +316,7 @@ This uses the Microsoft Search API to find `.agent` files tenant-wide and insert
    - `CopilotWeeklyMetrics`
    - `CopilotWeeklyAppMetrics`
    - `SharePointCopilotAgentRegistry`
-
+   - `CopilotInactiveAgents` (optional — summary and 60+ day inactive agents)
 #### 10.2 Build Screen 1 — Daily Overview
 
 - Insert → **Line chart** for DAU over time:
@@ -365,9 +417,10 @@ az deployment group create \
 .\scripts\Post-Deploy.ps1 `
   -TenantId <tenant-id> `
   -FunctionAppPrincipalId <from-output> `
-  -CloudEnvironment GCCHigh `
-  -SharePointSiteUrl https://contoso.sharepoint.us/sites/CopilotReporting
+  -CloudEnvironment GCCHigh
 ```
+
+Then grant SharePoint site access as described in [2b](#2b-grant-sharepoint-site-access-required-for-the-sharepoint-lists), using your `.sharepoint.us` site and the Graph endpoint for your cloud.
 
 ## Repo Structure
 
@@ -401,7 +454,9 @@ m365-copilot-adoption-metrics/
 │   └── measures/
 │       └── DAX_Measures.dax
 ├── scripts/
-│   ├── Post-Deploy.ps1              # Grants ActivityFeed.Read + SharePoint Sites.Selected
+│   ├── Post-Deploy.ps1              # Grants ActivityFeed.Read (SharePoint access: see step 2b)
+│   ├── Backfill-AgentRegistry.ps1   # One-time inventory of existing .agent files
+│   ├── Invoke-LabFunction.ps1       # Manually trigger a function and follow its logs
 │   └── Test-Repository.ps1
 └── workbook/
     └── copilot-adoption-workbook.json

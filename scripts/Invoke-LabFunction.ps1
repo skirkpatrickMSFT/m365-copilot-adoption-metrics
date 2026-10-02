@@ -21,6 +21,9 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Azure CLI extensions can print harmless Python warnings to stderr; Windows PowerShell 5.1
+# treats any native stderr output as a terminating error when ErrorActionPreference is Stop.
+$env:PYTHONWARNINGS = 'ignore'
 
 Write-Host "Ensuring public network access is enabled (needed for admin trigger)..." -ForegroundColor Cyan
 az functionapp update -g $ResourceGroup -n $AppName --set publicNetworkAccess=Enabled -o none
@@ -45,7 +48,9 @@ while ($true) {
          "| where timestamp > ago(10m) and operation_Name == '$Function' " +
          "| project timestamp, sev=coalesce(tostring(severityLevel),'EXC'), " +
          "msg=coalesce(message, outerMessage) | order by timestamp asc"
+    $prevEap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     $json = az monitor app-insights query --app $AppInsightsId --analytics-query $q -o json 2>$null
+    $ErrorActionPreference = $prevEap
     if ($json) {
         $rows = ($json | ConvertFrom-Json).tables[0].rows
         foreach ($r in $rows) {
