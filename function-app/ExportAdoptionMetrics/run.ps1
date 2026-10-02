@@ -19,6 +19,11 @@ $spWeeklyList     = Get-ConfiguredValue -Value $env:SHAREPOINT_WEEKLY_LIST      
 $spWeeklyAppList  = Get-ConfiguredValue -Value $env:SHAREPOINT_WEEKLY_APP_LIST  -DefaultValue 'CopilotWeeklyAppMetrics'
 # METRICS_LOOKBACK_DAYS: only used for backfill. Normal runs process today + yesterday only.
 $lookbackDays     = [int](Get-ConfiguredValue -Value $env:METRICS_LOOKBACK_DAYS -DefaultValue '7')
+$spAgentList      = Get-ConfiguredValue -Value $env:SHAREPOINT_AGENT_LIST          -DefaultValue 'SharePointCopilotAgentRegistry'
+$spInactiveList   = Get-ConfiguredValue -Value $env:SHAREPOINT_INACTIVE_AGENT_LIST -DefaultValue 'CopilotInactiveAgents'
+$inactiveDays     = [int](Get-ConfiguredValue -Value $env:AGENT_INACTIVE_DAYS      -DefaultValue '60')
+# AGENT_USAGE_REBUILD_DAYS: one-time rebuild of agent usage from the last N days of blobs (0 = off).
+$usageRebuildDays = [int](Get-ConfiguredValue -Value $env:AGENT_USAGE_REBUILD_DAYS -DefaultValue '0')
 
 if ([string]::IsNullOrWhiteSpace($spSiteUrl)) {
     Write-Warning 'SHAREPOINT_SITE_URL is not configured. Skipping export.'
@@ -31,9 +36,39 @@ function Get-ManagedToken {
     (Invoke-RestMethod -Uri $tokenUri -Headers @{ 'X-IDENTITY-HEADER' = $env:IDENTITY_HEADER }).access_token
 }
 
+# Normalizes DateTime/string values to a UTC DateTime; values without an offset are treated as UTC.
+function ConvertTo-UtcDate {
+    param($Value)
+    if ($null -eq $Value -or "$Value" -eq '') { return $null }
+    if ($Value -is [datetime]) {
+        if ($Value.Kind -eq [System.DateTimeKind]::Unspecified) { return [datetime]::SpecifyKind($Value, [System.DateTimeKind]::Utc) }
+        return $Value.ToUniversalTime()
+    }
+    $parsed = [datetime]::MinValue
+    $styles = [System.Globalization.DateTimeStyles]::AssumeUniversal -bor [System.Globalization.DateTimeStyles]::AdjustToUniversal
+    if ([datetime]::TryParse([string]$Value, [System.Globalization.CultureInfo]::InvariantCulture, $styles, [ref]$parsed)) { return $parsed }
+    return $null
+}
+
+# Records one Copilot interaction against an agent. Keyed by platform agent id when present, else by name.
+function Add-AgentUsage {
+    param([hashtable]$Table, $EventRecord)
+    if (-not $EventRecord.AgentId -and -not $EventRecord.AgentName) { return }
+    $key = if ($EventRecord.AgentId) { 'id:' + $EventRecord.AgentId.ToLowerInvariant() } else { 'name:' + $EventRecord.AgentName.Trim().ToLowerInvariant() }
+    if (-not $Table.ContainsKey($key)) {
+        $Table[$key] = @{ key = $key; id = [string]$EventRecord.AgentId; name = [string]$EventRecord.AgentName; siteUrl = [string]$EventRecord.AgentSiteUrl; lastUsed = $null; useCount = 0 }
+    }
+    $u = $Table[$key]
+    $u.useCount++
+    $when = ConvertTo-UtcDate $EventRecord.CreationTime
+    if ($when -and (-not $u.lastUsed -or $when -gt $u.lastUsed)) { $u.lastUsed = $when }
+    if (-not $u.name    -and $EventRecord.AgentName)    { $u.name    = [string]$EventRecord.AgentName }
+    if (-not $u.siteUrl -and $EventRecord.AgentSiteUrl) { $u.siteUrl = [string]$EventRecord.AgentSiteUrl }
+}
+
 $storageToken = Get-ManagedToken -Resource $storageAudience
 $spUri        = [System.Uri]$spSiteUrl
-$spToken      = Get-ManagedToken -Resource "$($spUri.Scheme)://$($spUri.Host)"
+$spToken      = Get-ManagedToken -Resource "$($spUri.Scheme)://$($spUri.Host)/"
 
 $baseUrl    = "https://$storageAccount.$storageSuffix/$container"
 $storageHdr = @{ 'Authorization' = "Bearer $storageToken"; 'x-ms-version' = '2021-08-06' }
@@ -68,7 +103,9 @@ $aggregatesUri   = "${baseUrl}/_state/dailyAggregates.json"
 $firstSeenUri    = "${baseUrl}/_state/firstSeen.json"
 $blobTrackerUri  = "${baseUrl}/_state/blobTracker.json"
 $liveSetsUri     = "${baseUrl}/_state/liveUserSets.json"
+$agentUsageUri   = "${baseUrl}/_state/agentUsage.json"
 
+$agentUsage      = @{}   # key (id:<platformId> | name:<name>) -> @{ key; id; name; siteUrl; lastUsed; useCount }
 $exportedDates   = @{}
 $dailyAggregates = @{}
 $firstSeenMap    = @{}
@@ -83,6 +120,14 @@ catch { Write-Host 'No daily aggregates cache.' }
 
 try { $fs = Invoke-RestMethod -Uri $firstSeenUri -Headers $storageHdr; foreach ($prop in $fs.PSObject.Properties) { $firstSeenMap[$prop.Name] = $prop.Value } }
 catch { Write-Host 'No firstSeen cache.' }
+
+try {
+    $au = Invoke-RestMethod -Uri $agentUsageUri -Headers $storageHdr
+    foreach ($prop in $au.PSObject.Properties) {
+        $v = $prop.Value
+        $agentUsage[$prop.Name] = @{ key = $prop.Name; id = [string]$v.id; name = [string]$v.name; siteUrl = [string]$v.siteUrl; lastUsed = (ConvertTo-UtcDate $v.lastUsed); useCount = [int]$v.useCount }
+    }
+} catch { Write-Host 'No agent usage cache.' }
 
 try {
     $bt = Invoke-RestMethod -Uri $blobTrackerUri -Headers $storageHdr
@@ -131,6 +176,8 @@ function ConvertTo-EventRecord {
                        elseif ($e.AgentName)                    { [string]$e.AgentName }
                        else                                      { $null }
         AgentSiteUrl = if ($agentResource) { [string]$agentResource.SiteUrl } else { $null }
+        AgentId      = if ($e.CopilotEventData.TargetPlatformAgentId) { [string]$e.CopilotEventData.TargetPlatformAgentId } else { $null }
+        CreationTime = $e.CreationTime
     }
 }
 
@@ -200,6 +247,7 @@ foreach ($dateStr in $datesToProcess) {
                 if (-not $appUserSets.ContainsKey($e.AppHost)) { $appUserSets[$e.AppHost] = [System.Collections.Generic.HashSet[string]]::new() }
                 $appUserSets[$e.AppHost].Add($e.UserId) | Out-Null
                 if (-not $firstSeenMap.ContainsKey($e.UserId)) { $firstSeenMap[$e.UserId] = $dateStr }
+                Add-AgentUsage -Table $agentUsage -EventRecord $e
             }
         } catch { Write-Warning "  Skipping ${name}: $($_.Exception.Message)" }
         $seenBlobs.Add($name) | Out-Null
@@ -226,8 +274,40 @@ foreach ($dateStr in $datesToProcess) {
     }
 }
 
+# ── Optional one-time rebuild of agent usage from historical blobs ───────────
+# Replaces the usage table with a fresh scan. For still-open dates only blobs already in the
+# blob tracker are read, so blobs arriving later are counted exactly once by the next run.
+if ($usageRebuildDays -gt 0) {
+    Write-Host "Rebuilding agent usage from the last $usageRebuildDays day(s)..."
+    $rebuilt = @{}
+    for ($d = $today.AddDays(-$usageRebuildDays); $d -le $today; $d = $d.AddDays(1)) {
+        $ds = $d.ToString('yyyy-MM-dd')
+        foreach ($name in (Get-DayBlobNames -DateStr $ds)) {
+            if ($blobTracker.ContainsKey($ds) -and -not $blobTracker[$ds].Contains($name)) { continue }
+            try {
+                $raw = Invoke-RestMethod -Uri "${baseUrl}/${name}" -Headers $storageHdr
+                foreach ($rawEvt in @($raw)) {
+                    $e = ConvertTo-EventRecord -e $rawEvt
+                    if ($e) { Add-AgentUsage -Table $rebuilt -EventRecord $e }
+                }
+            } catch { Write-Warning "  Rebuild skipped ${name}: $($_.Exception.Message)" }
+        }
+    }
+    $agentUsage = $rebuilt
+    Write-Host "Rebuilt usage for $($agentUsage.Count) agent key(s). Reset AGENT_USAGE_REBUILD_DAYS to 0."
+}
+
 # ── Persist computed data (not yet marking dates as done) ────────────────────
 $saveHdr = @{ 'Authorization' = "Bearer $storageToken"; 'x-ms-version' = '2021-08-06'; 'x-ms-blob-type' = 'BlockBlob'; 'Content-Type' = 'application/json' }
+$agentUsageOut = [ordered]@{}
+foreach ($k in $agentUsage.Keys) {
+    $u = $agentUsage[$k]
+    $agentUsageOut[$k] = [pscustomobject]@{
+        id = $u.id; name = $u.name; siteUrl = $u.siteUrl; useCount = $u.useCount
+        lastUsed = if ($u.lastUsed) { $u.lastUsed.ToString('o') } else { $null }
+    }
+}
+Invoke-RestMethod -Uri $agentUsageUri -Method PUT -Headers $saveHdr -Body ($agentUsageOut | ConvertTo-Json -Compress -Depth 3) | Out-Null
 Invoke-RestMethod -Uri $firstSeenUri -Method PUT -Headers $saveHdr -Body ($firstSeenMap   | ConvertTo-Json -Compress -Depth 2) | Out-Null
 Invoke-RestMethod -Uri $aggregatesUri -Method PUT -Headers $saveHdr -Body ($dailyAggregates | ConvertTo-Json -Compress -Depth 5) | Out-Null
 
@@ -419,6 +499,178 @@ if ($closedDates.Count -gt 0) {
     Invoke-RestMethod -Uri $liveSetsUri -Method PUT -Headers $saveHdr -Body ($liveSetsOut2 | ConvertTo-Json -Compress -Depth 4) | Out-Null
     Write-Host "Pruned tracking state for $($closedDates.Count) finalized date(s): $($closedDates -join ', ')"
 }
+
+# ── Agent usage → registry columns + inactive-agent list ─────────────────────
+# Runs every export (even with no new blobs) so agents age into the inactive list on day N.
+# Failures here are logged and never fail the metrics export.
+function Get-SpListItems {
+    param([string]$ListUrl, [string]$Fields, [hashtable]$Headers)
+    $items = [System.Collections.Generic.List[object]]::new()
+    $uri   = "${ListUrl}?`$select=${Fields}&`$top=5000"
+    while ($uri) {
+        $parsed = (Invoke-WebRequest -Uri $uri -Headers $Headers -UseBasicParsing).Content | ConvertFrom-Json -AsHashtable
+        if ($parsed.ContainsKey('value')) { foreach ($i in @($parsed['value'])) { $items.Add($i) } }
+        $uri = if ($parsed.ContainsKey('odata.nextLink')) { [string]$parsed['odata.nextLink'] } else { $null }
+    }
+    return ,$items
+}
+
+function Get-NormName { param($s) if ($s) { ([string]$s).Trim().ToLowerInvariant() } else { '' } }
+
+# SharePoint puts the useful reason (e.g. a missing column) in the response body, not the exception message.
+function Get-SpErrorText {
+    param($ErrorRecord)
+    $detail = $ErrorRecord.ErrorDetails.Message
+    if ($detail) { return "$($ErrorRecord.Exception.Message) | $($detail.Substring(0, [Math]::Min(300, $detail.Length)))" }
+    return $ErrorRecord.Exception.Message
+}
+function Get-NormSite { param($s) if ($s) { ([string]$s).Trim().TrimEnd('/').ToLowerInvariant() } else { '' } }
+
+try {
+    $spReadHdr  = @{ 'Authorization' = "Bearer $spToken"; 'Accept' = 'application/json;odata=nometadata' }
+    $spWriteHdr = @{ 'Authorization' = "Bearer $spToken"; 'Accept' = 'application/json;odata=nometadata'; 'Content-Type' = 'application/json;odata=nometadata' }
+    $agentApiBase    = "$spSiteUrl/_api/web/lists/getbytitle('$spAgentList')/items"
+    $inactiveApiBase = "$spSiteUrl/_api/web/lists/getbytitle('$spInactiveList')/items"
+
+    $baseFields   = 'Id,Title,AgentName,SiteUrl,CreatedDate'
+    $usageColumns = $true
+    $registry     = $null
+    try { $registry = Get-SpListItems -ListUrl $agentApiBase -Fields "$baseFields,LastUsedDate,UseCount,AgentPlatformID" -Headers $spReadHdr }
+    catch {
+        $usageColumns = $false
+        Write-Warning "Registry read with usage columns failed ($(Get-SpErrorText $_)). Create LastUsedDate, UseCount and AgentPlatformID on '$spAgentList'. Continuing without registry updates."
+        try { $registry = Get-SpListItems -ListUrl $agentApiBase -Fields $baseFields -Headers $spReadHdr }
+        catch { Write-Warning "Registry read failed: $(Get-SpErrorText $_). Skipping agent usage sync." }
+    }
+
+    if ($null -ne $registry) {
+        $rows = foreach ($item in $registry) {
+            $nm = if ($item['AgentName']) { [string]$item['AgentName'] } else { [string]$item['Title'] }
+            if (-not $nm) { continue }
+            [pscustomobject]@{
+                Id       = $item['Id']
+                Name     = $nm
+                SiteUrl  = [string]$item['SiteUrl']
+                Created  = ConvertTo-UtcDate $item['CreatedDate']
+                CurLast  = ConvertTo-UtcDate $item['LastUsedDate']
+                CurCount = [int]$item['UseCount']
+                CurPid   = [string]$item['AgentPlatformID']
+            }
+        }
+        $rows = @($rows)
+
+        $entries    = @($agentUsage.Values)
+        $claimedIds = [System.Collections.Generic.HashSet[string]]::new()
+        $nameCounts = @{}
+        foreach ($r in $rows) {
+            if ($r.CurPid) { $claimedIds.Add($r.CurPid.ToLowerInvariant()) | Out-Null }
+            $nk = Get-NormName $r.Name
+            $nameCounts[$nk] = 1 + [int]$nameCounts[$nk]
+        }
+
+        $matchedKeys = [System.Collections.Generic.HashSet[string]]::new()
+        $now         = (Get-Date).ToUniversalTime()
+        $inactive    = [System.Collections.Generic.List[object]]::new()
+        $updated     = 0
+
+        foreach ($r in $rows) {
+            # Match order: stored AgentPlatformID, then agent name (site-qualified when names repeat)
+            if ($r.CurPid) {
+                $hits = @($entries | Where-Object { $_.id -and $_.id.ToLowerInvariant() -eq $r.CurPid.ToLowerInvariant() })
+            } else {
+                $nk   = Get-NormName $r.Name
+                $hits = @($entries | Where-Object { (Get-NormName $_.name) -eq $nk -and (-not $_.id -or -not $claimedIds.Contains($_.id.ToLowerInvariant())) })
+                if ($nameCounts[$nk] -gt 1) {
+                    $rowSite = Get-NormSite $r.SiteUrl
+                    $hits    = @($hits | Where-Object { -not $_.siteUrl -or (Get-NormSite $_.siteUrl) -eq $rowSite })
+                    if ($hits.Count -gt 0) { Write-Warning "Agent name '$($r.Name)' is used by $($nameCounts[$nk]) registry rows; usage matched by site where possible." }
+                }
+            }
+
+            $useCount = 0; $lastUsed = $null
+            foreach ($h in $hits) {
+                $matchedKeys.Add($h.key) | Out-Null
+                $useCount += [int]$h.useCount
+                if ($h.lastUsed -and (-not $lastUsed -or $h.lastUsed -gt $lastUsed)) { $lastUsed = $h.lastUsed }
+            }
+            # Never regress values already stored on the row (e.g. after a partial rebuild)
+            if ($r.CurCount -gt $useCount) { $useCount = $r.CurCount }
+            if ($r.CurLast -and (-not $lastUsed -or $r.CurLast -gt $lastUsed)) { $lastUsed = $r.CurLast }
+
+            $newPid = $null
+            $hitIds = @($hits | Where-Object { $_.id } | ForEach-Object { $_.id } | Select-Object -Unique)
+            if (-not $r.CurPid -and $hitIds.Count -eq 1) { $newPid = $hitIds[0] }
+
+            if ($usageColumns) {
+                $patch = @{}
+                if ($useCount -ne $r.CurCount) { $patch['UseCount'] = $useCount }
+                if ($lastUsed -and (-not $r.CurLast -or [Math]::Abs(($r.CurLast - $lastUsed).TotalSeconds) -ge 1)) { $patch['LastUsedDate'] = $lastUsed.ToString('yyyy-MM-ddTHH:mm:ssZ') }
+                if ($newPid) { $patch['AgentPlatformID'] = $newPid }
+                if ($patch.Count -gt 0) {
+                    $mergeHdr = $spWriteHdr.Clone(); $mergeHdr['IF-MATCH'] = '*'; $mergeHdr['X-HTTP-Method'] = 'MERGE'
+                    try {
+                        Invoke-RestMethod -Uri "${agentApiBase}($($r.Id))" -Method POST -Headers $mergeHdr -Body ($patch | ConvertTo-Json -Compress) | Out-Null
+                        $updated++
+                    } catch { Write-Warning "  Registry update failed for '$($r.Name)': $(Get-SpErrorText $_)" }
+                }
+            }
+
+            # Never-used agents are measured from their creation date
+            $ref = if ($lastUsed) { $lastUsed } elseif ($r.Created) { $r.Created } else { $null }
+            if ($ref) {
+                $daysInactive = [int][Math]::Floor(($now - $ref).TotalDays)
+                if ($daysInactive -ge $inactiveDays) {
+                    $inactive.Add([pscustomobject]@{ Row = $r; LastUsed = $lastUsed; UseCount = $useCount; DaysInactive = $daysInactive })
+                }
+            }
+        }
+        Write-Host "Agent registry: $($rows.Count) agent(s), $updated row(s) updated, $($inactive.Count) inactive >= $inactiveDays day(s)."
+
+        $unmatched = @($entries | Where-Object { -not $matchedKeys.Contains($_.key) })
+        if ($unmatched.Count -gt 0) {
+            Write-Host "Usage not matched to a registry row ($($unmatched.Count)); showing up to 20:"
+            foreach ($u in ($unmatched | Sort-Object { $_.useCount } -Descending | Select-Object -First 20)) {
+                Write-Host "  '$($u.name)' | id=$($u.id) | site=$($u.siteUrl) | uses=$($u.useCount) | last=$($u.lastUsed)"
+            }
+        }
+
+        # Rewrite the inactive list: clear, then Summary row + one row per inactive agent
+        try {
+            $existing = Get-SpListItems -ListUrl $inactiveApiBase -Fields 'Id' -Headers $spReadHdr
+            foreach ($item in $existing) {
+                $delHdr = $spWriteHdr.Clone(); $delHdr['IF-MATCH'] = '*'; $delHdr['X-HTTP-Method'] = 'DELETE'
+                try { Invoke-WebRequest -Uri "${inactiveApiBase}($($item['Id']))" -Method POST -Headers $delHdr -UseBasicParsing | Out-Null }
+                catch {
+                    $code = $_.Exception.Response.StatusCode.value__
+                    if ($code -eq 429 -or $code -eq 503) {
+                        Start-Sleep -Seconds 10
+                        try { Invoke-WebRequest -Uri "${inactiveApiBase}($($item['Id']))" -Method POST -Headers $delHdr -UseBasicParsing | Out-Null } catch { Write-Warning "  Delete failed for $($item['Id'])" }
+                    } else { Write-Warning "  Delete failed ($code) for $($item['Id'])" }
+                }
+            }
+
+            Write-SpItem -ListUrl $inactiveApiBase -Token $spToken -Title 'Summary' -Fields @{
+                RowType       = 'Summary'
+                TotalAgents   = $rows.Count
+                InactiveCount = $inactive.Count
+                ThresholdDays = $inactiveDays
+                RunDate       = $now.ToString('yyyy-MM-ddTHH:mm:ssZ')
+            }
+            foreach ($i in ($inactive | Sort-Object DaysInactive -Descending)) {
+                $f = @{
+                    RowType      = 'InactiveAgent'
+                    AgentName    = $i.Row.Name
+                    SiteUrl      = $i.Row.SiteUrl
+                    UseCount     = $i.UseCount
+                    DaysInactive = $i.DaysInactive
+                }
+                if ($i.Row.Created) { $f['CreatedDate']  = $i.Row.Created.ToString('yyyy-MM-ddTHH:mm:ssZ') }
+                if ($i.LastUsed)    { $f['LastUsedDate'] = $i.LastUsed.ToString('yyyy-MM-ddTHH:mm:ssZ') }
+                Write-SpItem -ListUrl $inactiveApiBase -Token $spToken -Title $i.Row.Name -Fields $f
+            }
+        } catch { Write-Warning "Inactive agent list update failed: $(Get-SpErrorText $_)" }
+    }
+} catch { Write-Warning "Agent usage sync failed: $($_.Exception.Message)" }
 
 Write-Host "Export complete. Processed: $($datesToProcess.Count) date(s). Total in history: $($exportedDates.Count)."
 

@@ -725,6 +725,14 @@
               "value": "CopilotStudioAgentRegistry"
             },
             {
+              "name": "SHAREPOINT_INACTIVE_AGENT_LIST",
+              "value": "CopilotInactiveAgents"
+            },
+            {
+              "name": "AGENT_INACTIVE_DAYS",
+              "value": "60"
+            },
+            {
               "name": "METRICS_LOOKBACK_DAYS",
               "value": "[string(parameters('metricsLookbackDays'))]"
             },
