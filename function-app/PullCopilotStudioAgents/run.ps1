@@ -37,7 +37,7 @@ function Get-EventProp {
 
 $mgmtToken = Get-ManagedToken -Resource $mgmtApiBase
 $spUri     = [System.Uri]$spSiteUrl
-$spToken   = Get-ManagedToken -Resource "$($spUri.Scheme)://$($spUri.Host)"
+$spToken   = Get-ManagedToken -Resource "$($spUri.Scheme)://$($spUri.Host)/"
 
 # Ensure Audit.General subscription is active (shared with PullCopilotAudit)
 $subs   = @(Invoke-RestMethod -Method GET -Uri "$mgmtApiBase/api/v1.0/$tenantId/activity/feed/subscriptions/list" -Headers @{ Authorization = "Bearer $mgmtToken" })

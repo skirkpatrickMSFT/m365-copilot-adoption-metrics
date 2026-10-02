@@ -24,7 +24,7 @@ function Get-ManagedToken {
 
 $mgmtToken = Get-ManagedToken -Resource $mgmtApiBase
 $spUri     = [System.Uri]$spSiteUrl
-$spToken   = Get-ManagedToken -Resource "$($spUri.Scheme)://$($spUri.Host)"
+$spToken   = Get-ManagedToken -Resource "$($spUri.Scheme)://$($spUri.Host)/"
 
 # Ensure Audit.SharePoint subscription is active
 $subs  = @(Invoke-RestMethod -Method GET -Uri "$mgmtApiBase/api/v1.0/$tenantId/activity/feed/subscriptions/list" -Headers @{ Authorization = "Bearer $mgmtToken" })
