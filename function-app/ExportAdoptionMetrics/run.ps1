@@ -1,10 +1,11 @@
-param($Timer)
+﻿param($Timer)
 
 # Incremental design: only reads blobs for dates not yet processed.
 # Normal runs touch today + yesterday only. METRICS_LOOKBACK_DAYS controls backfill depth only.
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path (Split-Path $PSScriptRoot -Parent) 'CloudEnvironment.ps1')
+. (Join-Path (Split-Path $PSScriptRoot -Parent) 'SharedHelpers.ps1')
 
 $cloudEnvironment = Get-ConfiguredValue -Value $env:CLOUD_ENVIRONMENT   -DefaultValue 'Commercial'
 $cloud            = Get-CloudEnvironmentConfiguration -CloudEnvironment $cloudEnvironment
@@ -33,7 +34,9 @@ if ([string]::IsNullOrWhiteSpace($spSiteUrl)) {
 function Get-ManagedToken {
     param([string]$Resource)
     $tokenUri = "$($env:IDENTITY_ENDPOINT)?resource=$Resource&api-version=2019-08-01"
-    (Invoke-RestMethod -Uri $tokenUri -Headers @{ 'X-IDENTITY-HEADER' = $env:IDENTITY_HEADER }).access_token
+    (Invoke-HttpWithRetry -Description 'Managed identity token' -Request {
+        Invoke-RestMethod -Uri $tokenUri -Headers @{ 'X-IDENTITY-HEADER' = $env:IDENTITY_HEADER }
+    }).access_token
 }
 
 # Normalizes DateTime/string values to a UTC DateTime; values without an offset are treated as UTC.
@@ -72,6 +75,18 @@ $spToken      = Get-ManagedToken -Resource "$($spUri.Scheme)://$($spUri.Host)/"
 
 $baseUrl    = "https://$storageAccount.$storageSuffix/$container"
 $storageHdr = @{ 'Authorization' = "Bearer $storageToken"; 'x-ms-version' = '2021-08-06' }
+
+# Reads a state/data blob with retries. Returns $null only when the blob does not exist (404); any other
+# failure throws, so a transient storage error is never mistaken for "no state" and saved over good data.
+function Get-StateBlob {
+    param([string]$Uri)
+    try {
+        return Invoke-HttpWithRetry -Description "Read $(($Uri -split '/')[-1])" -Request { Invoke-RestMethod -Uri $Uri -Headers $storageHdr }
+    } catch {
+        if ((Get-HttpErrorStatus $_) -eq 404) { return $null }
+        throw
+    }
+}
 
 # ── Acquire a 60-second blob lease as a distributed lock ─────────────────────
 # A second run that starts while this one is in progress will fail to acquire
@@ -112,30 +127,33 @@ $firstSeenMap    = @{}
 $blobTracker     = @{}   # date -> HashSet[string] of already-processed blob names
 $liveUserSets    = @{}   # date -> @{ users = HashSet[string]; appUsers = @{ app -> HashSet[string] } }
 
-try { $d = Invoke-RestMethod -Uri $exportStateUri -Headers $storageHdr; foreach ($item in @($d)) { $exportedDates[$item] = $true } }
-catch { Write-Host 'No export state; will process all dates in lookback window.' }
+$d = Get-StateBlob $exportStateUri
+if ($null -ne $d) { foreach ($item in @($d)) { $exportedDates[$item] = $true } }
+else { Write-Host 'No export state; will process all dates in lookback window.' }
 
-try { $a = Invoke-RestMethod -Uri $aggregatesUri -Headers $storageHdr; foreach ($prop in $a.PSObject.Properties) { $dailyAggregates[$prop.Name] = $prop.Value } }
-catch { Write-Host 'No daily aggregates cache.' }
+$a = Get-StateBlob $aggregatesUri
+if ($null -ne $a) { foreach ($prop in $a.PSObject.Properties) { $dailyAggregates[$prop.Name] = $prop.Value } }
+else { Write-Host 'No daily aggregates cache.' }
 
-try { $fs = Invoke-RestMethod -Uri $firstSeenUri -Headers $storageHdr; foreach ($prop in $fs.PSObject.Properties) { $firstSeenMap[$prop.Name] = $prop.Value } }
-catch { Write-Host 'No firstSeen cache.' }
+$fs = Get-StateBlob $firstSeenUri
+if ($null -ne $fs) { foreach ($prop in $fs.PSObject.Properties) { $firstSeenMap[$prop.Name] = $prop.Value } }
+else { Write-Host 'No firstSeen cache.' }
 
-try {
-    $au = Invoke-RestMethod -Uri $agentUsageUri -Headers $storageHdr
+$au = Get-StateBlob $agentUsageUri
+if ($null -ne $au) {
     foreach ($prop in $au.PSObject.Properties) {
         $v = $prop.Value
         $agentUsage[$prop.Name] = @{ key = $prop.Name; id = [string]$v.id; name = [string]$v.name; siteUrl = [string]$v.siteUrl; lastUsed = (ConvertTo-UtcDate $v.lastUsed); useCount = [int]$v.useCount }
     }
-} catch { Write-Host 'No agent usage cache.' }
+} else { Write-Host 'No agent usage cache.' }
 
-try {
-    $bt = Invoke-RestMethod -Uri $blobTrackerUri -Headers $storageHdr
+$bt = Get-StateBlob $blobTrackerUri
+if ($null -ne $bt) {
     foreach ($prop in $bt.PSObject.Properties) { $blobTracker[$prop.Name] = [System.Collections.Generic.HashSet[string]]::new([string[]]$prop.Value) }
-} catch { Write-Host 'No blob tracker cache; will treat all blobs as new.' }
+} else { Write-Host 'No blob tracker cache; will treat all blobs as new.' }
 
-try {
-    $ls = Invoke-RestMethod -Uri $liveSetsUri -Headers $storageHdr
+$ls = Get-StateBlob $liveSetsUri
+if ($null -ne $ls) {
     foreach ($prop in $ls.PSObject.Properties) {
         $entry = $prop.Value
         $appUsersDict = @{}
@@ -147,7 +165,7 @@ try {
             appUsers = $appUsersDict
         }
     }
-} catch { Write-Host 'No live user-set cache; DAU will be rebuilt from new blobs only.' }
+} else { Write-Host 'No live user-set cache; DAU will be rebuilt from new blobs only.' }
 
 # ── Determine which dates to process ────────────────────────────────────────
 # Always: today (incomplete) and yesterday (late-arriving events).
@@ -189,7 +207,7 @@ function Get-DayBlobNames {
     $listBase = $baseUrl + '?restype=container' + '&comp=list' + '&prefix=' + $enc + '&maxresults=1000'
     $uri      = $listBase
     while ($uri) {
-        $xml   = [xml](Invoke-WebRequest -Uri $uri -Headers $storageHdr -UseBasicParsing).Content.TrimStart([char]0xFEFF)
+        $xml   = [xml](Invoke-HttpWithRetry -Description 'List storage blobs' -Request { Invoke-WebRequest -Uri $uri -Headers $storageHdr -UseBasicParsing }).Content.TrimStart([char]0xFEFF)
         $nodes = $xml.EnumerationResults.Blobs.Blob
         if ($nodes) { foreach ($n in @($nodes | Where-Object { $_.Name -and $_.Name.EndsWith('.json') } | Select-Object -ExpandProperty Name)) { $names.Add($n) } }
         $marker = $xml.EnumerationResults.NextMarker
@@ -205,6 +223,7 @@ function Get-WeekStart {
 }
 
 # ── Process each date: only download/parse blobs not already counted ─────────
+$failedDates = [System.Collections.Generic.HashSet[string]]::new()   # dates with a blob we could not read
 foreach ($dateStr in $datesToProcess) {
     Write-Host "Processing $dateStr ..."
     $allBlobNames = Get-DayBlobNames -DateStr $dateStr
@@ -234,22 +253,27 @@ foreach ($dateStr in $datesToProcess) {
     $newEventCount = 0
     foreach ($name in $newBlobNames) {
         try {
-            $raw  = Invoke-RestMethod -Uri "${baseUrl}/${name}" -Headers $storageHdr
+            $raw  = Invoke-HttpWithRetry -Description "Download $name" -Request { Invoke-RestMethod -Uri "${baseUrl}/${name}" -Headers $storageHdr }
             $evts = if ($raw -is [array]) { $raw } else { @($raw) }
-            foreach ($rawEvt in $evts) {
-                $e = ConvertTo-EventRecord -e $rawEvt
-                if (-not $e) { continue }
-                $newEventCount++
-                $interactions++
-                if (-not $appCounts.ContainsKey($e.AppHost)) { $appCounts[$e.AppHost] = 0 }
-                $appCounts[$e.AppHost]++
-                $userSet.Add($e.UserId) | Out-Null
-                if (-not $appUserSets.ContainsKey($e.AppHost)) { $appUserSets[$e.AppHost] = [System.Collections.Generic.HashSet[string]]::new() }
-                $appUserSets[$e.AppHost].Add($e.UserId) | Out-Null
-                if (-not $firstSeenMap.ContainsKey($e.UserId)) { $firstSeenMap[$e.UserId] = $dateStr }
-                Add-AgentUsage -Table $agentUsage -EventRecord $e
-            }
-        } catch { Write-Warning "  Skipping ${name}: $($_.Exception.Message)" }
+            # Parse the whole blob before counting anything so a failure cannot leave it half-counted.
+            $batch = @(foreach ($rawEvt in $evts) { $rec = ConvertTo-EventRecord -e $rawEvt; if ($rec) { $rec } })
+        } catch {
+            # Leave the blob unseen so the next run retries it; do not finalize this date.
+            Write-Warning "  Could not read ${name}; will retry next run: $($_.Exception.Message)"
+            $failedDates.Add($dateStr) | Out-Null
+            continue
+        }
+        foreach ($e in $batch) {
+            $newEventCount++
+            $interactions++
+            if (-not $appCounts.ContainsKey($e.AppHost)) { $appCounts[$e.AppHost] = 0 }
+            $appCounts[$e.AppHost]++
+            $userSet.Add($e.UserId) | Out-Null
+            if (-not $appUserSets.ContainsKey($e.AppHost)) { $appUserSets[$e.AppHost] = [System.Collections.Generic.HashSet[string]]::new() }
+            $appUserSets[$e.AppHost].Add($e.UserId) | Out-Null
+            if (-not $firstSeenMap.ContainsKey($e.UserId)) { $firstSeenMap[$e.UserId] = $dateStr }
+            Add-AgentUsage -Table $agentUsage -EventRecord $e
+        }
         $seenBlobs.Add($name) | Out-Null
     }
     Write-Host "  Parsed $newEventCount new event(s)."
@@ -280,21 +304,26 @@ foreach ($dateStr in $datesToProcess) {
 if ($usageRebuildDays -gt 0) {
     Write-Host "Rebuilding agent usage from the last $usageRebuildDays day(s)..."
     $rebuilt = @{}
+    $rebuildFailed = $false
     for ($d = $today.AddDays(-$usageRebuildDays); $d -le $today; $d = $d.AddDays(1)) {
         $ds = $d.ToString('yyyy-MM-dd')
         foreach ($name in (Get-DayBlobNames -DateStr $ds)) {
             if ($blobTracker.ContainsKey($ds) -and -not $blobTracker[$ds].Contains($name)) { continue }
             try {
-                $raw = Invoke-RestMethod -Uri "${baseUrl}/${name}" -Headers $storageHdr
+                $raw = Invoke-HttpWithRetry -Description "Download $name" -Request { Invoke-RestMethod -Uri "${baseUrl}/${name}" -Headers $storageHdr }
                 foreach ($rawEvt in @($raw)) {
                     $e = ConvertTo-EventRecord -e $rawEvt
                     if ($e) { Add-AgentUsage -Table $rebuilt -EventRecord $e }
                 }
-            } catch { Write-Warning "  Rebuild skipped ${name}: $($_.Exception.Message)" }
+            } catch { $rebuildFailed = $true; Write-Warning "  Rebuild could not read ${name}: $($_.Exception.Message)" }
         }
     }
-    $agentUsage = $rebuilt
-    Write-Host "Rebuilt usage for $($agentUsage.Count) agent key(s). Reset AGENT_USAGE_REBUILD_DAYS to 0."
+    if ($rebuildFailed) {
+        Write-Warning 'Agent usage rebuild was incomplete; keeping the existing usage. Re-run the rebuild once the errors clear.'
+    } else {
+        $agentUsage = $rebuilt
+        Write-Host "Rebuilt usage for $($agentUsage.Count) agent key(s). Reset AGENT_USAGE_REBUILD_DAYS to 0."
+    }
 }
 
 # ── Persist computed data (not yet marking dates as done) ────────────────────
@@ -307,14 +336,14 @@ foreach ($k in $agentUsage.Keys) {
         lastUsed = if ($u.lastUsed) { $u.lastUsed.ToString('o') } else { $null }
     }
 }
-Invoke-RestMethod -Uri $agentUsageUri -Method PUT -Headers $saveHdr -Body ($agentUsageOut | ConvertTo-Json -Compress -Depth 3) | Out-Null
-Invoke-RestMethod -Uri $firstSeenUri -Method PUT -Headers $saveHdr -Body ($firstSeenMap   | ConvertTo-Json -Compress -Depth 2) | Out-Null
-Invoke-RestMethod -Uri $aggregatesUri -Method PUT -Headers $saveHdr -Body ($dailyAggregates | ConvertTo-Json -Compress -Depth 5) | Out-Null
+Invoke-HttpWithRetry -Description 'Save state' -Request { Invoke-RestMethod -Uri $agentUsageUri -Method PUT -Headers $saveHdr -Body ($agentUsageOut | ConvertTo-Json -Compress -Depth 3) } | Out-Null
+Invoke-HttpWithRetry -Description 'Save state' -Request { Invoke-RestMethod -Uri $firstSeenUri -Method PUT -Headers $saveHdr -Body ($firstSeenMap   | ConvertTo-Json -Compress -Depth 2) } | Out-Null
+Invoke-HttpWithRetry -Description 'Save state' -Request { Invoke-RestMethod -Uri $aggregatesUri -Method PUT -Headers $saveHdr -Body ($dailyAggregates | ConvertTo-Json -Compress -Depth 5) } | Out-Null
 
 # Serialize blobTracker (HashSet -> array) — only open dates are ever present here
 $blobTrackerOut = @{}
 foreach ($k in $blobTracker.Keys) { $blobTrackerOut[$k] = @($blobTracker[$k]) }
-Invoke-RestMethod -Uri $blobTrackerUri -Method PUT -Headers $saveHdr -Body ($blobTrackerOut | ConvertTo-Json -Compress -Depth 3) | Out-Null
+Invoke-HttpWithRetry -Description 'Save state' -Request { Invoke-RestMethod -Uri $blobTrackerUri -Method PUT -Headers $saveHdr -Body ($blobTrackerOut | ConvertTo-Json -Compress -Depth 3) } | Out-Null
 
 # Serialize liveUserSets (HashSet -> array), same open-dates-only scope
 $liveSetsOut = @{}
@@ -323,7 +352,7 @@ foreach ($k in $liveUserSets.Keys) {
     foreach ($ap in $liveUserSets[$k].appUsers.Keys) { $appUsersOut[$ap] = @($liveUserSets[$k].appUsers[$ap]) }
     $liveSetsOut[$k] = @{ users = @($liveUserSets[$k].users); appUsers = $appUsersOut }
 }
-Invoke-RestMethod -Uri $liveSetsUri -Method PUT -Headers $saveHdr -Body ($liveSetsOut | ConvertTo-Json -Compress -Depth 4) | Out-Null
+Invoke-HttpWithRetry -Description 'Save state' -Request { Invoke-RestMethod -Uri $liveSetsUri -Method PUT -Headers $saveHdr -Body ($liveSetsOut | ConvertTo-Json -Compress -Depth 4) } | Out-Null
 
 # ── Write to SharePoint ───────────────────────────────────────────────────────
 # Delete items from a list whose Title exactly matches any value in the provided set.
@@ -337,8 +366,9 @@ function Remove-SpItemsByTitles {
     $titleSet = [System.Collections.Generic.HashSet[string]]::new([string[]]$Titles)
     $deleted  = 0
 
-    $rawResp = try { Invoke-WebRequest -Uri "${ListUrl}?`$select=Id,Title&`$top=5000" -Headers $readHdr -UseBasicParsing } catch { $null }
-    $parsed  = if ($rawResp) { try { $rawResp.Content | ConvertFrom-Json -AsHashtable } catch { $null } } else { $null }
+    # A failed read must stop the run: treating it as "empty" would skip the deletes and create duplicates.
+    $rawResp = Invoke-HttpWithRetry -Description 'Read list items' -Request { Invoke-WebRequest -Uri "${ListUrl}?`$select=Id,Title&`$top=5000" -Headers $readHdr -UseBasicParsing }
+    $parsed  = $rawResp.Content | ConvertFrom-Json -AsHashtable
     $all     = if ($parsed -and $parsed.ContainsKey('value')) { @($parsed['value']) } else { @() }
 
     foreach ($item in $all) {
@@ -347,12 +377,14 @@ function Remove-SpItemsByTitles {
         if (-not $id -or -not $titleSet.Contains($title)) { continue }
         $delHdr = $writeHdr.Clone(); $delHdr['IF-MATCH'] = '*'; $delHdr['X-HTTP-Method'] = 'DELETE'
         try {
-            Invoke-WebRequest -Uri "${ListUrl}($id)" -Method POST -Headers $delHdr -UseBasicParsing | Out-Null
+            Invoke-HttpWithRetry -Description "Delete list item $id" -Request {
+                Invoke-WebRequest -Uri "${ListUrl}($id)" -Method POST -Headers $delHdr -UseBasicParsing
+            } | Out-Null
             $deleted++
         } catch {
-            $code = $_.Exception.Response.StatusCode.value__
-            if ($code -eq 429 -or $code -eq 503) { Start-Sleep -Seconds 10 }
-            else { Write-Warning "  Delete failed ($code) for $id" }
+            if ((Get-HttpErrorStatus $_) -eq 404) { continue }   # already gone
+            # Stop before any rewrite: a row we could not delete would otherwise be duplicated.
+            throw "Delete failed for item $id in ${ListUrl}: $($_.Exception.Message)"
         }
     }
     Write-Host "  Deleted $deleted item(s) matching $($Titles.Count) title(s)."
@@ -362,7 +394,9 @@ function Write-SpItem {
     param([string]$ListUrl, [string]$Token, [string]$Title, [hashtable]$Fields)
     $Fields['Title'] = $Title
     $writeHdr = @{ 'Authorization' = "Bearer $Token"; 'Accept' = 'application/json;odata=nometadata'; 'Content-Type' = 'application/json;odata=nometadata' }
-    Invoke-RestMethod -Uri $ListUrl -Method POST -Headers $writeHdr -Body ($Fields | ConvertTo-Json -Compress) | Out-Null
+    Invoke-HttpWithRetry -Description "Write list item '$Title'" -Request {
+        Invoke-RestMethod -Uri $ListUrl -Method POST -Headers $writeHdr -Body ($Fields | ConvertTo-Json -Compress)
+    } | Out-Null
     Write-Host "  Written: $Title"
 }
 
@@ -476,9 +510,10 @@ foreach ($ws in $affectedWeeks) {
 
 # ── Mark dates as exported only after all SharePoint writes succeeded ────────
 foreach ($dateStr in $datesToProcess) {
-    if ($dateStr -ne $todayStr -and $dateStr -ne $yestStr) { $exportedDates[$dateStr] = $true }
+    # A date with an unreadable blob stays open so the next run retries it.
+    if ($dateStr -ne $todayStr -and $dateStr -ne $yestStr -and -not $failedDates.Contains($dateStr)) { $exportedDates[$dateStr] = $true }
 }
-Invoke-RestMethod -Uri $exportStateUri -Method PUT -Headers $saveHdr -Body ($exportedDates.Keys | ConvertTo-Json -Compress) | Out-Null
+Invoke-HttpWithRetry -Description 'Save state' -Request { Invoke-RestMethod -Uri $exportStateUri -Method PUT -Headers $saveHdr -Body ($exportedDates.Keys | ConvertTo-Json -Compress) } | Out-Null
 
 # Prune blobTracker/liveUserSets for dates that are now finalized — their final
 # counts are permanently kept in dailyAggregates, so the per-blob/per-user
@@ -488,7 +523,7 @@ foreach ($cd in $closedDates) { $blobTracker.Remove($cd); $liveUserSets.Remove($
 if ($closedDates.Count -gt 0) {
     $blobTrackerOut2 = @{}
     foreach ($k in $blobTracker.Keys) { $blobTrackerOut2[$k] = @($blobTracker[$k]) }
-    Invoke-RestMethod -Uri $blobTrackerUri -Method PUT -Headers $saveHdr -Body ($blobTrackerOut2 | ConvertTo-Json -Compress -Depth 3) | Out-Null
+    Invoke-HttpWithRetry -Description 'Save state' -Request { Invoke-RestMethod -Uri $blobTrackerUri -Method PUT -Headers $saveHdr -Body ($blobTrackerOut2 | ConvertTo-Json -Compress -Depth 3) } | Out-Null
 
     $liveSetsOut2 = @{}
     foreach ($k in $liveUserSets.Keys) {
@@ -496,7 +531,7 @@ if ($closedDates.Count -gt 0) {
         foreach ($ap in $liveUserSets[$k].appUsers.Keys) { $appUsersOut2[$ap] = @($liveUserSets[$k].appUsers[$ap]) }
         $liveSetsOut2[$k] = @{ users = @($liveUserSets[$k].users); appUsers = $appUsersOut2 }
     }
-    Invoke-RestMethod -Uri $liveSetsUri -Method PUT -Headers $saveHdr -Body ($liveSetsOut2 | ConvertTo-Json -Compress -Depth 4) | Out-Null
+    Invoke-HttpWithRetry -Description 'Save state' -Request { Invoke-RestMethod -Uri $liveSetsUri -Method PUT -Headers $saveHdr -Body ($liveSetsOut2 | ConvertTo-Json -Compress -Depth 4) } | Out-Null
     Write-Host "Pruned tracking state for $($closedDates.Count) finalized date(s): $($closedDates -join ', ')"
 }
 
@@ -508,7 +543,7 @@ function Get-SpListItems {
     $items = [System.Collections.Generic.List[object]]::new()
     $uri   = "${ListUrl}?`$select=${Fields}&`$top=5000"
     while ($uri) {
-        $parsed = (Invoke-WebRequest -Uri $uri -Headers $Headers -UseBasicParsing).Content | ConvertFrom-Json -AsHashtable
+        $parsed = (Invoke-HttpWithRetry -Description 'Read list items' -Request { Invoke-WebRequest -Uri $uri -Headers $Headers -UseBasicParsing }).Content | ConvertFrom-Json -AsHashtable
         if ($parsed.ContainsKey('value')) { foreach ($i in @($parsed['value'])) { $items.Add($i) } }
         $uri = if ($parsed.ContainsKey('odata.nextLink')) { [string]$parsed['odata.nextLink'] } else { $null }
     }
@@ -609,7 +644,9 @@ try {
                 if ($patch.Count -gt 0) {
                     $mergeHdr = $spWriteHdr.Clone(); $mergeHdr['IF-MATCH'] = '*'; $mergeHdr['X-HTTP-Method'] = 'MERGE'
                     try {
-                        Invoke-RestMethod -Uri "${agentApiBase}($($r.Id))" -Method POST -Headers $mergeHdr -Body ($patch | ConvertTo-Json -Compress) | Out-Null
+                        Invoke-HttpWithRetry -Description "Update registry row $($r.Id)" -Request {
+                            Invoke-RestMethod -Uri "${agentApiBase}($($r.Id))" -Method POST -Headers $mergeHdr -Body ($patch | ConvertTo-Json -Compress)
+                        } | Out-Null
                         $updated++
                     } catch { Write-Warning "  Registry update failed for '$($r.Name)': $(Get-SpErrorText $_)" }
                 }
@@ -639,13 +676,14 @@ try {
             $existing = Get-SpListItems -ListUrl $inactiveApiBase -Fields 'Id' -Headers $spReadHdr
             foreach ($item in $existing) {
                 $delHdr = $spWriteHdr.Clone(); $delHdr['IF-MATCH'] = '*'; $delHdr['X-HTTP-Method'] = 'DELETE'
-                try { Invoke-WebRequest -Uri "${inactiveApiBase}($($item['Id']))" -Method POST -Headers $delHdr -UseBasicParsing | Out-Null }
-                catch {
-                    $code = $_.Exception.Response.StatusCode.value__
-                    if ($code -eq 429 -or $code -eq 503) {
-                        Start-Sleep -Seconds 10
-                        try { Invoke-WebRequest -Uri "${inactiveApiBase}($($item['Id']))" -Method POST -Headers $delHdr -UseBasicParsing | Out-Null } catch { Write-Warning "  Delete failed for $($item['Id'])" }
-                    } else { Write-Warning "  Delete failed ($code) for $($item['Id'])" }
+                try {
+                    Invoke-HttpWithRetry -Description "Delete inactive-list item $($item['Id'])" -Request {
+                        Invoke-WebRequest -Uri "${inactiveApiBase}($($item['Id']))" -Method POST -Headers $delHdr -UseBasicParsing
+                    } | Out-Null
+                } catch {
+                    if ((Get-HttpErrorStatus $_) -eq 404) { continue }   # already gone
+                    # Abort before rewriting so rows we could not delete are not duplicated.
+                    throw "Delete failed for item $($item['Id']): $($_.Exception.Message)"
                 }
             }
 

@@ -2,6 +2,7 @@ param($Timer)
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path (Split-Path $PSScriptRoot -Parent) 'CloudEnvironment.ps1')
+. (Join-Path (Split-Path $PSScriptRoot -Parent) 'SharedHelpers.ps1')
 
 # --- Configuration ---
 $cloudEnvironment = Get-ConfiguredValue -Value $env:CLOUD_ENVIRONMENT -DefaultValue 'Commercial'
@@ -48,7 +49,9 @@ Write-Host "Processing window: $startTime to $endTime"
 function Get-ManagedToken {
     param([string]$Resource)
     $tokenUri = "$($env:IDENTITY_ENDPOINT)?resource=$Resource&api-version=2019-08-01"
-    $response = Invoke-RestMethod -Uri $tokenUri -Headers @{ "X-IDENTITY-HEADER" = $env:IDENTITY_HEADER } -Method GET
+    $response = Invoke-HttpWithRetry -Description 'Managed identity token' -Request {
+        Invoke-RestMethod -Uri $tokenUri -Headers @{ "X-IDENTITY-HEADER" = $env:IDENTITY_HEADER } -Method GET
+    }
     return $response.access_token
 }
 
@@ -58,27 +61,15 @@ function Invoke-WithRetry {
         [string]$Method = "GET",
         [string]$Token,
         [object]$Body,
-        [int]$MaxRetries = 3
+        [int]$MaxRetries = 5
     )
     $headers = @{ "Authorization" = "Bearer $Token"; "Content-Type" = "application/json" }
-    for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
-        try {
-            $params = @{ Uri = $Uri; Method = $Method; Headers = $headers }
-            if ($Body) { $params.Body = if ($Body -is [string]) { $Body } else { $Body | ConvertTo-Json -Depth 20 -Compress } }
-            $response = Invoke-WebRequest @params -UseBasicParsing
-            return @{ Body = $response.Content | ConvertFrom-Json; Headers = $response.Headers; Status = $response.StatusCode }
-        }
-        catch {
-            $statusCode = $_.Exception.Response.StatusCode.value__
-            if ($statusCode -eq 429 -and $attempt -lt $MaxRetries) {
-                $retryAfter = 30
-                if ($_.Exception.Response.Headers["Retry-After"]) { $retryAfter = [int]$_.Exception.Response.Headers["Retry-After"] }
-                Write-Warning "Throttled (429). Waiting $retryAfter seconds (attempt $attempt/$MaxRetries)"
-                Start-Sleep -Seconds $retryAfter
-            }
-            else { throw }
-        }
+    $response = Invoke-HttpWithRetry -Description "$Method $(($Uri -split '\?')[0])" -MaxAttempts $MaxRetries -Request {
+        $params = @{ Uri = $Uri; Method = $Method; Headers = $headers }
+        if ($Body) { $params.Body = if ($Body -is [string]) { $Body } else { $Body | ConvertTo-Json -Depth 20 -Compress } }
+        Invoke-WebRequest @params -UseBasicParsing
     }
+    return @{ Body = $response.Content | ConvertFrom-Json; Headers = $response.Headers; Status = $response.StatusCode }
 }
 
 $mgmtToken    = Get-ManagedToken -Resource $mgmtApiBase
@@ -103,6 +94,7 @@ if ($allContentBlobs.Count -eq 0) {
 }
 
 $totalCopilotEvents = 0
+$deliveryFailed = $false   # set when a storage/ingestion write fails in a way worth retrying next run
 
 foreach ($blob in $allContentBlobs) {
     Write-Host "Fetching blob: $($blob.contentId)"
@@ -119,8 +111,10 @@ foreach ($blob in $allContentBlobs) {
     Write-Host "  Found $($copilotEvents.Count) Copilot event(s)"
     $totalCopilotEvents += $copilotEvents.Count
 
+    # Deterministic name (hash of the content id) so re-reading a window after a failure overwrites
+    # nothing and creates no duplicate blobs. If-None-Match makes an existing blob a no-op.
     $dateFolder = (Get-Date).ToUniversalTime().ToString("yyyy/MM/dd")
-    $blobName = "$dateFolder/$((Get-Date).ToUniversalTime().ToString('HHmmss'))-$([guid]::NewGuid().ToString()).json"
+    $blobName = "$dateFolder/$(Get-StableId -Value $(if ($blob.contentId) { $blob.contentId } else { $blob.contentUri })).json"
     $blobUri = "https://$storageAccount.$storageSuffix/$container/$blobName"
     $storageHeaders = @{
         "Authorization"  = "Bearer $storageToken"
@@ -128,23 +122,24 @@ foreach ($blob in $allContentBlobs) {
         "Content-Type"   = "application/json"
         "x-ms-version"   = "2021-08-06"
     }
+    $storageHeaders["If-None-Match"] = "*"
     $blobBody = $copilotEvents | ConvertTo-Json -Depth 20
     if ($copilotEvents.Count -eq 1) { $blobBody = "[$blobBody]" }
 
     try {
-        Invoke-RestMethod -Uri $blobUri -Method PUT -Headers $storageHeaders -Body $blobBody
+        Invoke-HttpWithRetry -Description "Write blob $blobName" -Request {
+            Invoke-RestMethod -Uri $blobUri -Method PUT -Headers $storageHeaders -Body $blobBody | Out-Null
+        }
         Write-Host "  Written to storage: $blobName"
     }
     catch {
-        $stCode = $_.Exception.Response.StatusCode.value__
-        if ($stCode -eq 429) {
-            Write-Warning "  Storage throttled (429). Retrying in 30s..."
-            Start-Sleep -Seconds 30
-            try {
-                Invoke-RestMethod -Uri $blobUri -Method PUT -Headers $storageHeaders -Body $blobBody
-                Write-Host "  Written to storage on retry: $blobName"
-            } catch { Write-Warning "  Failed on retry: $($_.Exception.Message)" }
-        } else { Write-Warning "  Failed to write to storage: $($_.Exception.Message)" }
+        $stCode = Get-HttpErrorStatus $_
+        if ($stCode -eq 409 -or $stCode -eq 412) {
+            Write-Host "  Already in storage (window re-read): $blobName"
+        } else {
+            Write-Warning "  Failed to write to storage: $($_.Exception.Message)"
+            if ($stCode -notin 400, 413) { $deliveryFailed = $true }
+        }
     }
 
     $ingestUri = "$dceUri/dataCollectionRules/$dcrId/streams/${streamName}?api-version=2023-01-01"
@@ -159,12 +154,21 @@ foreach ($blob in $allContentBlobs) {
             Invoke-WithRetry -Uri $ingestUri -Method "POST" -Token $monitorToken -Body $chunkJson
             Write-Host "  Sent chunk of $($chunk.Count) events to Log Analytics"
         }
-        catch { Write-Warning "  Failed to send to Log Analytics: $($_.Exception.Message)" }
+        catch {
+            Write-Warning "  Failed to send to Log Analytics: $($_.Exception.Message)"
+            if ((Get-HttpErrorStatus $_) -notin 400, 413) { $deliveryFailed = $true }
+        }
     }
     }
 }
 
 Write-Host "Complete. Total Copilot events processed: $totalCopilotEvents"
+
+# Do not advance the processed-up-to timestamp after a failed delivery: the next run re-reads this window
+# (storage writes are idempotent). Failing the run also surfaces it to the failed-run alert.
+if ($deliveryFailed) {
+    throw 'One or more storage/Log Analytics writes failed; processed-up-to timestamp not advanced. The window will be retried on the next run.'
+}
 
 try {
     Invoke-RestMethod -Uri $stateBlob -Method PUT -Headers @{

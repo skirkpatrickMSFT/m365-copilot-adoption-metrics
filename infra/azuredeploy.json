@@ -5,7 +5,7 @@
     "_generator": {
       "name": "bicep",
       "version": "0.46.1.21595",
-      "templateHash": "924871668907535670"
+      "templateHash": "8272426748237851726"
     }
   },
   "parameters": {
@@ -144,6 +144,13 @@
       ],
       "metadata": {
         "description": "AMPLS ingestion access mode. PrivateOnly for production; Open permits public ingestion (useful for lab validation without full private telemetry routing)."
+      }
+    },
+    "alertEmailAddress": {
+      "type": "string",
+      "defaultValue": "",
+      "metadata": {
+        "description": "Optional email address notified when a function fails repeatedly (requires deployLogAnalytics). Leave empty to create the alert rule without notifications; it is then visible under Azure Monitor > Alerts."
       }
     }
   },
@@ -595,6 +602,64 @@
       },
       "dependsOn": [
         "[resourceId('Microsoft.OperationalInsights/workspaces', parameters('lawName'))]"
+      ]
+    },
+    {
+      "condition": "[and(parameters('deployLogAnalytics'), not(empty(parameters('alertEmailAddress'))))]",
+      "type": "Microsoft.Insights/actionGroups",
+      "apiVersion": "2023-01-01",
+      "name": "[format('ag-{0}-failures', parameters('funcAppName'))]",
+      "location": "global",
+      "properties": {
+        "groupShortName": "CopilotFail",
+        "enabled": true,
+        "emailReceivers": [
+          {
+            "name": "owner",
+            "emailAddress": "[parameters('alertEmailAddress')]",
+            "useCommonAlertSchema": true
+          }
+        ]
+      }
+    },
+    {
+      "condition": "[parameters('deployLogAnalytics')]",
+      "type": "Microsoft.Insights/scheduledQueryRules",
+      "apiVersion": "2022-06-15",
+      "name": "[format('alert-{0}-failed-runs', parameters('funcAppName'))]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "displayName": "[format('Copilot adoption functions failing ({0})', parameters('funcAppName'))]",
+        "description": "A Copilot audit/metrics function failed repeatedly. Check Application Insights > Failures and the function logs.",
+        "enabled": true,
+        "severity": 2,
+        "evaluationFrequency": "PT15M",
+        "windowSize": "PT1H",
+        "scopes": [
+          "[resourceId('Microsoft.Insights/components', parameters('funcAppName'))]"
+        ],
+        "autoMitigate": true,
+        "criteria": {
+          "allOf": [
+            {
+              "query": "requests\n| where timestamp > ago(1h) and success == false\n| summarize Failures = count() by operation_Name\n| where Failures >= 2 or operation_Name == 'ExportAdoptionMetrics'",
+              "timeAggregation": "Count",
+              "operator": "GreaterThan",
+              "threshold": 0,
+              "failingPeriods": {
+                "numberOfEvaluationPeriods": 1,
+                "minFailingPeriodsToAlert": 1
+              }
+            }
+          ]
+        },
+        "actions": {
+          "actionGroups": "[if(not(empty(parameters('alertEmailAddress'))), createArray(resourceId('Microsoft.Insights/actionGroups', format('ag-{0}-failures', parameters('funcAppName')))), createArray())]"
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Insights/actionGroups', format('ag-{0}-failures', parameters('funcAppName')))]",
+        "[resourceId('Microsoft.Insights/components', parameters('funcAppName'))]"
       ]
     },
     {

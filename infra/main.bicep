@@ -69,6 +69,9 @@ param deployLogAnalytics bool = true
 @allowed(['PrivateOnly', 'Open'])
 param amplsIngestionAccessMode string = 'PrivateOnly'
 
+@description('Optional email address notified when a function fails repeatedly (requires deployLogAnalytics). Leave empty to create the alert rule without notifications; it is then visible under Azure Monitor > Alerts.')
+param alertEmailAddress string = ''
+
 // Cloud-specific endpoint mappings
 var cloudEndpoints = {
   Commercial: {
@@ -372,6 +375,60 @@ resource appInsights 'Microsoft.Insights/components@2020-02-02' = if (deployLogA
   properties: {
     Application_Type: 'web'
     WorkspaceResourceId: law.id
+  }
+}
+
+// Failed-run alert: the 15-minute timers fire after 2 failed runs within an hour (a single failure is usually a
+// transient API error that the next run recovers); ExportAdoptionMetrics runs every 4 hours so one failure fires.
+resource alertActionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = if (deployLogAnalytics && !empty(alertEmailAddress)) {
+  name: 'ag-${funcAppName}-failures'
+  location: 'global'
+  properties: {
+    groupShortName: 'CopilotFail'
+    enabled: true
+    emailReceivers: [
+      {
+        name: 'owner'
+        emailAddress: alertEmailAddress
+        useCommonAlertSchema: true
+      }
+    ]
+  }
+}
+
+resource failedRunAlert 'Microsoft.Insights/scheduledQueryRules@2022-06-15' = if (deployLogAnalytics) {
+  name: 'alert-${funcAppName}-failed-runs'
+  location: location
+  properties: {
+    displayName: 'Copilot adoption functions failing (${funcAppName})'
+    description: 'A Copilot audit/metrics function failed repeatedly. Check Application Insights > Failures and the function logs.'
+    enabled: true
+    severity: 2
+    evaluationFrequency: 'PT15M'
+    windowSize: 'PT1H'
+    scopes: [
+      appInsights.id
+    ]
+    autoMitigate: true
+    criteria: {
+      allOf: [
+        {
+          query: 'requests\n| where timestamp > ago(1h) and success == false\n| summarize Failures = count() by operation_Name\n| where Failures >= 2 or operation_Name == \'ExportAdoptionMetrics\''
+          timeAggregation: 'Count'
+          operator: 'GreaterThan'
+          threshold: 0
+          failingPeriods: {
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
+          }
+        }
+      ]
+    }
+    actions: {
+      actionGroups: !empty(alertEmailAddress) ? [
+        alertActionGroup.id
+      ] : []
+    }
   }
 }
 
