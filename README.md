@@ -99,6 +99,7 @@ az deployment group create \
                deployLogAnalytics=false
 ```
 
+**Failure alerts (optional):** when Log Analytics / Application Insights is deployed, a log-search alert named `alert-<funcAppName>-failed-runs` is created. It fires when a 15-minute function fails twice within an hour, or when `ExportAdoptionMetrics` fails once. Add `alertEmailAddress=you@contoso.com` to the deployment to create an action group that emails you; with it empty the rule is still created and shows under Azure Monitor → Alerts.
 ### 2. Grant API Permissions (post-deployment)
 
 Run **locally** — Cloud Shell cannot acquire tokens for manage.office.com:
@@ -384,6 +385,10 @@ For the near-real-time Log Analytics dashboard:
 | Incremental export design | `ExportAdoptionMetrics` only reads new blobs; SharePoint always receives a full historical snapshot from cache |
 | Clear-all before rewrite | Eliminates duplicates unconditionally; title-based OData filters are unreliable on SharePoint REST |
 | Agent tracking via `Audit.SharePoint` | `FileUploaded` + `SourceFileExtension == agent` is the only reliable signal for agent creation; `TargetAgentName` only appears in `Audit.General` once a user actually interacts with the agent |
+| Shared retry helper (`SharedHelpers.ps1`) | Every Management API, storage and SharePoint call retries HTTP 408/429/5xx and network errors with exponential backoff (honouring `Retry-After`, 5 attempts); 400/401/403/404 fail immediately |
+| Progress only advances on success | `PullCopilotAudit` keeps its processed-up-to timestamp unchanged when a storage or Log Analytics write fails, and fails the run so the window is re-read; storage blobs are named from a hash of the Management API content id with `If-None-Match: *`, so a re-read never duplicates blobs (Log Analytics can receive a re-sent event; events carry a unique `Id` for de-duplication in KQL) |
+| Watermark for the agent pollers | `PullSharePointAgents` and `PullCopilotStudioAgents` keep a processed-up-to blob (`_state/lastProcessed-spagents.txt`, `_state/lastProcessed-studio.txt`) and re-read from it after a failed run; registry writes are de-duplicated. The window is never shorter than the configured window and never longer than 23 hours |
+| Fail loudly, never assume "empty" | A failed read of state or of a SharePoint list stops the run instead of being treated as "nothing there", which would overwrite good state or create duplicate rows. `ExportAdoptionMetrics` leaves an unreadable blob unseen (retried next run) and does not finalize that date |
 
 ## Cloud Environment Support
 
@@ -434,6 +439,7 @@ m365-copilot-adoption-metrics/
 │   ├── host.json
 │   ├── profile.ps1
 │   ├── CloudEnvironment.ps1         # Cloud endpoint helper
+│   ├── SharedHelpers.ps1            # HTTP retry/backoff and processed-up-to watermark helpers
 │   ├── PullCopilotAudit/            # Timer — pulls Office 365 audit → ADLS + Log Analytics
 │   │   ├── function.json            # schedule: every 15 min
 │   │   └── run.ps1
